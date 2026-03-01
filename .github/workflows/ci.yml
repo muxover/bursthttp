@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go-version: ["1.22", "1.23"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 -timeout=120s ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Files not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
