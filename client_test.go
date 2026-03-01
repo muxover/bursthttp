@@ -452,9 +452,12 @@ func TestClientGetURL(t *testing.T) {
 }
 
 func TestHTTPMethods(t *testing.T) {
+	var lastMethodMu sync.Mutex
 	var lastMethod string
 	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastMethodMu.Lock()
 		lastMethod = r.Method
+		lastMethodMu.Unlock()
 		w.WriteHeader(200)
 		w.Write([]byte("ok"))
 	}))
@@ -476,8 +479,11 @@ func TestHTTPMethods(t *testing.T) {
 			t.Fatalf("%s: %v", m.name, err)
 		}
 		c.ReleaseResponse(resp)
-		if lastMethod != m.name {
-			t.Errorf("expected method %s, got %s", m.name, lastMethod)
+		lastMethodMu.Lock()
+		got := lastMethod
+		lastMethodMu.Unlock()
+		if got != m.name {
+			t.Errorf("expected method %s, got %s", m.name, got)
 		}
 	}
 
@@ -493,8 +499,11 @@ func TestHTTPMethods(t *testing.T) {
 			t.Fatalf("%s: %v", m.name, err)
 		}
 		c.ReleaseResponse(resp)
-		if lastMethod != m.name {
-			t.Errorf("expected method %s, got %s", m.name, lastMethod)
+		lastMethodMu.Lock()
+		got := lastMethod
+		lastMethodMu.Unlock()
+		if got != m.name {
+			t.Errorf("expected method %s, got %s", m.name, got)
 		}
 	}
 }
