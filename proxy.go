@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net"
 	"net/url"
 	"time"
@@ -53,6 +54,20 @@ func NewProxyDialer(config *Config) (*ProxyDialer, error) {
 		readTimeout:    config.ProxyReadTimeout,
 		enableLogging:  config.EnableLogging,
 	}, nil
+}
+
+// DialForward connects to the proxy over plain TCP without issuing a CONNECT
+// request. Used for HTTP (non-TLS) targets where the proxy acts as a
+// forward proxy: the client sends the absolute-form request directly to the
+// proxy TCP socket and the proxy forwards it to the origin.
+func (p *ProxyDialer) DialForward() (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", p.proxyAddr, p.connectTimeout)
+	if err != nil {
+		return nil, LogErrorWithFlag(ErrorTypeProxy, "forward proxy connection failed", err, map[string]interface{}{
+			"proxy": p.proxyAddr,
+		}, p.enableLogging)
+	}
+	return conn, nil
 }
 
 // Dial establishes a connection through the proxy using HTTP CONNECT.
@@ -112,7 +127,7 @@ func (p *ProxyDialer) buildTarget(host string, port int) string {
 func (p *ProxyDialer) writeConnect(conn net.Conn, target string) error {
 	targetLen := len(target)
 	authLen := len(p.authHeader)
-	totalSize := 8 + targetLen + 19 + targetLen + 2 + authLen + 2
+	totalSize := 8 + targetLen + 17 + targetLen + 2 + authLen + 2
 
 	var stackBuf [512]byte
 	var buf []byte
@@ -128,7 +143,7 @@ func (p *ProxyDialer) writeConnect(conn net.Conn, target string) error {
 	copy(buf[pos:], target)
 	pos += targetLen
 	copy(buf[pos:], " HTTP/1.1\r\nHost: ")
-	pos += 19
+	pos += 17
 	copy(buf[pos:], target)
 	pos += targetLen
 	copy(buf[pos:], "\r\n")
@@ -208,7 +223,8 @@ func (p *ProxyDialer) readConnectResponse(conn net.Conn) error {
 
 	// Status code sits at bytes 9-11 ("HTTP/1.x 200 ...")
 	if !(buf[9] == '2' && buf[10] == '0' && buf[11] == '0') {
-		return WrapError(ErrorTypeProxy, "proxy CONNECT failed", ErrProxyFailed)
+		statusCode := int(buf[9]-'0')*100 + int(buf[10]-'0')*10 + int(buf[11]-'0')
+		return WrapError(ErrorTypeProxy, fmt.Sprintf("proxy CONNECT rejected (HTTP %d)", statusCode), ErrProxyFailed)
 	}
 
 	return nil

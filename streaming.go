@@ -74,21 +74,3 @@ func (r *bodyReader) Read(p []byte) (int, error) {
 func (r *bodyReader) Close() error {
 	return nil
 }
-
-// ReaderRequest is a request that reads its body from an io.Reader
-// instead of a pre-allocated []byte. This allows streaming large
-// request bodies without buffering them entirely in memory.
-type ReaderRequest struct {
-	Method     string
-	URL        string
-	Path       string
-	BodyReader io.Reader
-	ContentLen int64 // Required: Content-Length must be known upfront.
-	Compressed bool
-	headers    []Header
-}
-
-// AddHeader adds a header to the reader request.
-func (r *ReaderRequest) AddHeader(key, value string) {
-	r.headers = append(r.headers, Header{Key: key, Value: value})
-}

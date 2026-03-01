@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1475,8 +1476,9 @@ func TestBuiltinMetrics(t *testing.T) {
 	if snap.RequestsOK != 5 {
 		t.Errorf("RequestsOK = %d, want 5", snap.RequestsOK)
 	}
-	if snap.LatencyP50 <= 0 {
-		t.Error("LatencyP50 should be > 0")
+	// LatencyP50 can be 0 on very fast local requests (e.g. under -race); >= 0 is sufficient.
+	if snap.LatencyP50 < 0 {
+		t.Error("LatencyP50 should be >= 0")
 	}
 	if snap.BytesRead <= 0 {
 		t.Error("BytesRead should be > 0")
@@ -1893,4 +1895,514 @@ func handleProxyConn(conn net.Conn) {
 	go func() { defer proxyWg.Done(); io.Copy(targetConn, reader) }()
 	go func() { defer proxyWg.Done(); io.Copy(conn, targetConn) }()
 	proxyWg.Wait()
+}
+
+// TestProxyDialerCONNECTRequest verifies the CONNECT request is correctly
+// formed (no null bytes in the Host header) when using an HTTP proxy.
+func TestProxyDialerCONNECTRequest(t *testing.T) {
+	// Intercept the raw CONNECT bytes sent by ProxyDialer.
+	var received []byte
+	var mu sync.Mutex
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 512)
+		n, _ := conn.Read(buf)
+		mu.Lock()
+		received = buf[:n]
+		mu.Unlock()
+		// Reply with 200 so Dial returns without error.
+		conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+	}()
+
+	cfg := DefaultConfig()
+	cfg.ProxyURL = "http://" + ln.Addr().String()
+	cfg.ProxyUsername = "user"
+	cfg.ProxyPassword = "pass"
+	cfg.ProxyConnectTimeout = 3 * time.Second
+	cfg.ProxyReadTimeout = 3 * time.Second
+
+	pd, err := NewProxyDialer(cfg)
+	if err != nil {
+		t.Fatalf("NewProxyDialer: %v", err)
+	}
+
+	conn, err := pd.Dial("example.com", 443)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	conn.Close()
+	<-done
+
+	mu.Lock()
+	raw := string(received)
+	mu.Unlock()
+
+	// Must not contain null bytes anywhere.
+	for i, b := range received {
+		if b == 0 {
+			t.Errorf("null byte at position %d in CONNECT request:\n%q", i, raw)
+		}
+	}
+
+	// Host header value must immediately follow "Host: " without any garbage.
+	const marker = "Host: "
+	idx := strings.Index(raw, marker)
+	if idx == -1 {
+		t.Fatalf("Host header not found in CONNECT request:\n%q", raw)
+	}
+	hostVal := raw[idx+len(marker):]
+	if !strings.HasPrefix(hostVal, "example.com:443") {
+		t.Errorf("Host header value = %q, want prefix \"example.com:443\"", hostVal)
+	}
+}
+
+// newHTTPForwardProxy starts an in-process HTTP forward proxy that reads
+// absolute-URI requests and forwards them to the origin.
+func newHTTPForwardProxy(t testing.TB) (addr string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("proxy listen: %v", err)
+	}
+	stopCh := make(chan struct{})
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Forward the request to the origin using the standard http client.
+			target := r.URL
+			if target.Host == "" {
+				http.Error(w, "missing host", 400)
+				return
+			}
+			outReq, err := http.NewRequest(r.Method, target.String(), r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			resp, err := http.DefaultTransport.RoundTrip(outReq)
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			defer resp.Body.Close()
+			for k, vs := range resp.Header {
+				for _, v := range vs {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
+		}),
+	}
+	go srv.Serve(ln)
+	stop = func() {
+		close(stopCh)
+		srv.Close()
+	}
+	return ln.Addr().String(), stop
+}
+
+// TestProxyDialerThroughRealProxy exercises the full client → forward proxy → target
+// path for HTTP (non-TLS) requests.
+func TestProxyDialerThroughRealProxy(t *testing.T) {
+	// Start a tiny origin server.
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("proxied"))
+	}))
+
+	// Start an in-process HTTP forward proxy.
+	proxyAddr, stopProxy := newHTTPForwardProxy(t)
+
+	originHost, originPortStr, _ := strings.Cut(strings.TrimPrefix(origin.URL, "http://"), ":")
+	var originPort int
+	fmt.Sscanf(originPortStr, "%d", &originPort)
+
+	cfg := DefaultConfig()
+	cfg.Host = originHost
+	cfg.Port = originPort
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.EnableLogging = false
+	cfg.PoolSize = 2
+	cfg.ProxyURL = "http://" + proxyAddr
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		stopProxy()
+		origin.Close()
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	resp, err := c.Get("/", nil)
+	c.Stop()
+	origin.Close()
+	stopProxy()
+
+	if err != nil {
+		t.Fatalf("GET through forward proxy: %v", err)
+	}
+	defer c.ReleaseResponse(resp)
+
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(resp.Body) != "proxied" {
+		t.Errorf("body = %q, want \"proxied\"", resp.Body)
+	}
+}
+
+// TestForwardProxyRequest verifies that an HTTP (non-TLS) request through a
+// forward proxy uses absolute-URI form and injects the Proxy-Authorization
+// header — without sending a CONNECT request.
+func TestForwardProxyRequest(t *testing.T) {
+	// Capture the raw bytes the client sends to the "proxy".
+	var received []byte
+	var mu sync.Mutex
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1024)
+		n, _ := conn.Read(buf)
+		mu.Lock()
+		received = buf[:n]
+		mu.Unlock()
+		// Reply with a minimal HTTP response so the client doesn't hang.
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	}()
+
+	cfg := DefaultConfig()
+	cfg.Host = "example.com"
+	cfg.Port = 80
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.EnableLogging = false
+	cfg.PoolSize = 1
+	cfg.ProxyURL = "http://" + ln.Addr().String()
+	cfg.ProxyUsername = "user"
+	cfg.ProxyPassword = "pass"
+	cfg.ProxyConnectTimeout = 3 * time.Second
+	cfg.ProxyReadTimeout = 3 * time.Second
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	resp, err := c.Get("/test", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	c.ReleaseResponse(resp)
+	<-done
+
+	mu.Lock()
+	raw := string(received)
+	mu.Unlock()
+
+	// Must NOT start with CONNECT.
+	if strings.HasPrefix(raw, "CONNECT") {
+		t.Errorf("forward proxy sent CONNECT instead of absolute-URI request:\n%q", raw)
+	}
+
+	// Request line must use absolute-URI form.
+	if !strings.HasPrefix(raw, "GET http://example.com/test HTTP/1.1") {
+		t.Errorf("request line = %q, want absolute-URI form", strings.SplitN(raw, "\r\n", 2)[0])
+	}
+
+	// Must include Proxy-Authorization header.
+	if !strings.Contains(raw, "Proxy-Authorization: Basic ") {
+		t.Errorf("Proxy-Authorization header missing in:\n%q", raw)
+	}
+}
+
+// TestProxyCONNECT407 verifies that a 407 proxy rejection includes the status
+// code in the error message returned by ProxyDialer.Dial.
+func TestProxyCONNECT407(t *testing.T) {
+	// Stand up a fake proxy that accepts all connections and always returns 407.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 512)
+				c.Read(buf)
+				c.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n"))
+			}(conn)
+		}
+	}()
+
+	// Test ProxyDialer.Dial directly — this is where the 407 status code
+	// is included in the error, before it gets wrapped by the pool layer.
+	cfg := DefaultConfig()
+	cfg.ProxyURL = "http://" + ln.Addr().String()
+	cfg.ProxyConnectTimeout = 3 * time.Second
+	cfg.ProxyReadTimeout = 3 * time.Second
+
+	d, err := NewProxyDialer(cfg)
+	if err != nil {
+		t.Fatalf("NewProxyDialer: %v", err)
+	}
+
+	_, err = d.Dial("example.com", 443)
+	if err == nil {
+		t.Fatal("expected error for 407 response, got nil")
+	}
+	if !strings.Contains(err.Error(), "407") {
+		t.Errorf("error should mention status 407, got: %v", err)
+	}
+}
+
+// TestIsForwardProxy verifies the forward-proxy detection logic in the Dialer.
+func TestIsForwardProxy(t *testing.T) {
+	// No proxy configured → never a forward proxy.
+	cfg := DefaultConfig()
+	cfg.Host = "example.com"
+	d, err := NewDialer(cfg)
+	if err != nil {
+		t.Fatalf("NewDialer: %v", err)
+	}
+	defer d.Stop()
+	if d.IsForwardProxy(false) {
+		t.Error("IsForwardProxy should be false when no proxy is configured")
+	}
+	if d.IsForwardProxy(true) {
+		t.Error("IsForwardProxy should be false when no proxy is configured (TLS)")
+	}
+
+	// HTTP proxy + plain HTTP target → forward proxy.
+	cfg2 := DefaultConfig()
+	cfg2.ProxyURL = "http://proxy.example.com:3128"
+	d2, err := NewDialer(cfg2)
+	if err != nil {
+		t.Fatalf("NewDialer with proxy: %v", err)
+	}
+	defer d2.Stop()
+	if !d2.IsForwardProxy(false) {
+		t.Error("IsForwardProxy should be true for HTTP target through HTTP proxy")
+	}
+	if d2.IsForwardProxy(true) {
+		t.Error("IsForwardProxy should be false for HTTPS target (uses CONNECT instead)")
+	}
+}
+
+// TestChunkedBodyWithTrailers verifies that chunked responses with trailer
+// headers are parsed correctly and trailers are fully drained.
+func TestChunkedBodyWithTrailers(t *testing.T) {
+	// Craft a chunked response that includes trailers after the terminal chunk.
+	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Checksum\r\n\r\n" +
+		"5\r\nhello\r\n" +
+		"6\r\n world\r\n" +
+		"0\r\n" +
+		"X-Checksum: abc123\r\n" + // trailer header
+		"\r\n"
+
+	conn := newFakeConn([]byte(raw))
+	buf := make([]byte, 4096)
+	resp := &Response{bodyBuf: make([]byte, 4096), Headers: make([]Header, 0, 8)}
+
+	err := readResponse(conn, buf, resp, 1<<20, "GET", 4096, 4096)
+	if err != nil {
+		t.Fatalf("readResponse with trailers: %v", err)
+	}
+	if string(resp.Body) != "hello world" {
+		t.Errorf("body = %q, want %q", resp.Body, "hello world")
+	}
+}
+
+// TestGracefulStopUnderLoad verifies GracefulStop waits for in-flight requests.
+func TestGracefulStopUnderLoad(t *testing.T) {
+	slow := make(chan struct{})
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-slow
+		w.WriteHeader(200)
+		w.Write([]byte("done"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.PoolSize = 4
+	cfg.EnableLogging = false
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		resp, err := c.Get("/slow", nil)
+		if err == nil {
+			c.ReleaseResponse(resp)
+		}
+		errCh <- err
+	}()
+
+	// Give the goroutine time to start the request.
+	time.Sleep(50 * time.Millisecond)
+
+	drainedCh := make(chan bool, 1)
+	go func() {
+		drainedCh <- c.GracefulStop(2 * time.Second)
+	}()
+
+	// Unblock the server handler.
+	close(slow)
+
+	drained := <-drainedCh
+	if !drained {
+		t.Error("GracefulStop reported timeout, expected clean drain")
+	}
+	<-errCh
+}
+
+// TestMaxRequestsPerConn verifies that connections are cycled after
+// MaxRequestsPerConn requests.
+func TestMaxRequestsPerConn(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.PoolSize = 8
+	cfg.MaxRequestsPerConn = 2 // recycle after 2 requests
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	// Issue 6 requests with MaxRequestsPerConn=2 → at least 3 connections created.
+	for i := 0; i < 6; i++ {
+		resp, err := c.Get("/", nil)
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		c.ReleaseResponse(resp)
+	}
+}
+
+// TestErrInvalidRequest verifies that a nil request returns ErrInvalidRequest.
+func TestErrInvalidRequest(t *testing.T) {
+	cfg := DefaultConfig()
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	_, err = c.DoWithContext(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for nil request")
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest in error chain, got: %v", err)
+	}
+}
+
+// TestIsTimeoutContextDeadline verifies IsTimeout handles context.DeadlineExceeded.
+func TestIsTimeoutContextDeadline(t *testing.T) {
+	if !IsTimeout(context.DeadlineExceeded) {
+		t.Error("IsTimeout should return true for context.DeadlineExceeded")
+	}
+	if IsTimeout(context.Canceled) {
+		t.Error("IsTimeout should return false for context.Canceled (cancellation != timeout)")
+	}
+	wrapped := fmt.Errorf("outer: %w", context.DeadlineExceeded)
+	if !IsTimeout(wrapped) {
+		t.Error("IsTimeout should return true for wrapped context.DeadlineExceeded")
+	}
+}
+
+// TestIsTimeoutNetError verifies IsTimeout handles net.Error with Timeout()==true.
+// Uses a raw listener that accepts but never responds, so the read deadline fires.
+func TestIsTimeoutNetError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	// Accept connections and hold them open without sending any data.
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Hold open but never write — forces client read timeout.
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+
+	host, portStr, _ := strings.Cut(ln.Addr().String(), ":")
+	port := 0
+	fmt.Sscanf(portStr, "%d", &port)
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.PoolSize = 1
+	cfg.ReadTimeout = 50 * time.Millisecond
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	_, err = c.Get("/", nil)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !IsTimeout(err) {
+		t.Errorf("IsTimeout(%v) = false, want true", err)
+	}
 }

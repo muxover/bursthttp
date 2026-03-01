@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -160,7 +161,7 @@ func (c *Client) Do(req *Request) (*Response, error) {
 // If retries are configured, transient failures are retried automatically.
 func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, error) {
 	if req == nil {
-		return nil, WrapError(ErrorTypeValidation, "request is nil", ErrInvalidResponse)
+		return nil, WrapError(ErrorTypeValidation, "request is nil", ErrInvalidRequest)
 	}
 
 	req.ctx = ctx
@@ -310,7 +311,7 @@ func (c *Client) DoReader(ctx context.Context, method, urlOrPath string, bodyRea
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
 	req.Method = method
-	if len(urlOrPath) > 0 && (len(urlOrPath) > 8 && (urlOrPath[:7] == "http://" || urlOrPath[:8] == "https://")) {
+	if strings.HasPrefix(urlOrPath, "http://") || strings.HasPrefix(urlOrPath, "https://") {
 		req.URL = urlOrPath
 	} else {
 		req.Path = urlOrPath

@@ -35,6 +35,57 @@ func NewDialer(config *Config) (*Dialer, error) {
 	return d, nil
 }
 
+// IsForwardProxy reports whether HTTP requests to non-TLS targets should be
+// sent via forward-proxy mode (absolute URI + Proxy-Authorization), rather
+// than through an HTTP CONNECT tunnel.
+func (d *Dialer) IsForwardProxy(useTLS bool) bool {
+	return d.proxyDialer != nil && !useTLS
+}
+
+// ProxyAuthHeader returns the pre-encoded "Proxy-Authorization: Basic …\r\n"
+// header bytes, or nil when no proxy credentials are configured.
+func (d *Dialer) ProxyAuthHeader() []byte {
+	if d.proxyDialer != nil {
+		return d.proxyDialer.authHeader
+	}
+	return nil
+}
+
+// DialForward connects to the proxy's TCP address without issuing a CONNECT
+// request, then applies the same socket options as DialAddr.
+// Used when IsForwardProxy returns true.
+func (d *Dialer) DialForward() (net.Conn, error) {
+	if d.proxyDialer == nil {
+		return nil, WrapError(ErrorTypeProxy, "no proxy configured for forward dial", ErrProxyFailed)
+	}
+	conn, err := d.proxyDialer.DialForward()
+	if err != nil {
+		return nil, err
+	}
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		if err := tcpConn.SetNoDelay(d.config.TCPNoDelay); err != nil {
+			conn.Close()
+			return nil, LogErrorWithFlag(ErrorTypeInternal, "set TCP no delay failed", err, nil, d.config.EnableLogging)
+		}
+		if d.config.TCPKeepAlive {
+			if err := tcpConn.SetKeepAlive(true); err != nil {
+				conn.Close()
+				return nil, LogErrorWithFlag(ErrorTypeInternal, "set TCP keep alive failed", err, nil, d.config.EnableLogging)
+			}
+			if d.config.TCPKeepAlivePeriod > 0 {
+				_ = tcpConn.SetKeepAlivePeriod(d.config.TCPKeepAlivePeriod)
+			}
+		}
+		if d.config.ReadBufferSize > 0 {
+			_ = tcpConn.SetReadBuffer(d.config.ReadBufferSize)
+		}
+		if d.config.WriteBufferSize > 0 {
+			_ = tcpConn.SetWriteBuffer(d.config.WriteBufferSize)
+		}
+	}
+	return conn, nil
+}
+
 // Stop cleans up dialer resources (DNS cache).
 func (d *Dialer) Stop() {
 	if d.dnsCache != nil {

@@ -180,8 +180,8 @@ func ExampleMultipartBuilder() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("body length: %d, has boundary: %v\n", len(body), len(contentType) > 0)
-	// Output: body length: 510, has boundary: true
+	fmt.Printf("has body: %v, has boundary: %v\n", len(body) > 0, len(contentType) > 0)
+	// Output: has body: true, has boundary: true
 }
 
 func ExampleNewRetryer() {

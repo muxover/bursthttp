@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -329,4 +330,125 @@ func BenchmarkFindHeaderEnd(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		findHeaderEnd(buf)
 	}
+}
+
+func BenchmarkWriteRequest(b *testing.B) {
+	req := &Request{
+		Method:    "GET",
+		Path:      "/api/v1/users",
+		headerBuf: make([]byte, 4096),
+	}
+	req.SetHeader("Accept", "application/json")
+	req.SetHeader("X-Request-Id", "bench-123")
+
+	cfg := DefaultConfig()
+	cfg.KeepAlive = true
+	buf := make([]byte, 4096)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = writeRequest(buf, req, cfg, "api.example.com", 443, true, nil, false, false, nil)
+	}
+}
+
+func BenchmarkWriteRequestForwardProxy(b *testing.B) {
+	req := &Request{
+		Method:    "GET",
+		Path:      "/api/v1/users",
+		headerBuf: make([]byte, 4096),
+	}
+	req.SetHeader("Accept", "application/json")
+
+	cfg := DefaultConfig()
+	cfg.KeepAlive = true
+	buf := make([]byte, 4096)
+	authHeader := []byte("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = writeRequest(buf, req, cfg, "proxy.example.com", 3128, false, nil, false, true, authHeader)
+	}
+}
+
+func BenchmarkReadResponse(b *testing.B) {
+	srv := newTestServer([]byte(`{"status":"ok","message":"benchmark response body"}`))
+	defer srv.Close()
+
+	host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+	port := 80
+	fmt.Sscanf(portStr, "%d", &port)
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.PoolSize = 1
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	benchmarkClientSerial(b, cfg)
+}
+
+func BenchmarkViaHTTPProxy(b *testing.B) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("proxied-ok"))
+	}))
+	defer origin.Close()
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp, err := http.Get(r.RequestURI)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}))
+	defer proxy.Close()
+
+	proxyHost, proxyPortStr, _ := strings.Cut(strings.TrimPrefix(proxy.URL, "http://"), ":")
+	proxyPort := 8080
+	fmt.Sscanf(proxyPortStr, "%d", &proxyPort)
+
+	cfg := DefaultConfig()
+	cfg.Host = origin.URL[7:] // strip http://
+	cfg.Port = 80
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.PoolSize = 8
+	cfg.ProxyURL = proxy.URL
+	cfg.ProxyConnectTimeout = 5 * time.Second
+	cfg.ProxyReadTimeout = 5 * time.Second
+
+	_ = proxyHost
+	_ = proxyPort
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		b.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			req := c.AcquireRequest()
+			req.Method = "GET"
+			req.Path = "/"
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			resp, err := c.DoWithContext(ctx, req)
+			if err == nil {
+				c.ReleaseResponse(resp)
+			}
+			cancel()
+			c.ReleaseRequest(req)
+		}
+	})
 }

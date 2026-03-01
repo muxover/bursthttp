@@ -7,7 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-03-01
+## [0.1.1] - 2026-03-06
+
+### Added
+- `ErrInvalidRequest` sentinel error for nil request validation.
+- Proxy rejection error now includes HTTP status code (e.g. `proxy CONNECT rejected (HTTP 407)`).
+- Benchmarks: `BenchmarkWriteRequest`, `BenchmarkWriteRequestForwardProxy`, `BenchmarkReadResponse`, `BenchmarkViaHTTPProxy`.
+- Tests: `TestProxyCONNECT407`, `TestIsForwardProxy`, `TestChunkedBodyWithTrailers`, `TestGracefulStopUnderLoad`, `TestMaxRequestsPerConn`, `TestErrInvalidRequest`, `TestIsTimeoutContextDeadline`, `TestIsTimeoutNetError`.
+
+### Changed
+- `IsTimeout` now uses `errors.Is` / `errors.As` — handles `ErrTimeout`, `context.DeadlineExceeded`, `*DetailedError`, and `net.Error.Timeout()`.
+- `IsRetryable` now uses `errors.Is` / `errors.As` instead of direct comparison.
+- `connection.go`: explicit `useTLS := tlsConfig != nil` instead of inlined `IsForwardProxy(tlsConfig != nil)`.
+- `examples/basic/main.go`: User-Agent uses `bursthttp.GetVersion()` instead of hardcoded version string.
+- `ExampleMultipartBuilder`: output check uses `len(body) > 0` and `len(contentType) > 0` (boundary is random).
+
+### Fixed
+- **parser.go**: `readChunkedBody` now drains all trailer headers after the terminal `0\r\n` chunk (RFC 7230 §4.1 compliance).
+- **connection.go**: Removed 2-attempt retry loop in `connectLocked` — dial is single attempt (avoids doubling proxy timeouts, e.g. 30s → 60s per `createConnection`).
+- **pool.go**: In `GetConnection`, if `createConnection()` returns nil after >1ms, return nil immediately instead of retrying (avoids 20× timeout cascade with slow or dead proxies).
+- **client.go**: Nil request check now returns `ErrInvalidRequest` (was incorrectly `ErrInvalidResponse`).
+- **client.go**: `DoReader` URL detection uses `strings.HasPrefix("http://")` / `strings.HasPrefix("https://")` instead of magic length checks.
+
+### Removed
+- Dead `ReaderRequest` struct and `AddHeader` method from `streaming.go` (unused).
+
+## [0.1.0] - 2026-03-06
 
 ### Added
 - HTTP/1.1 client with persistent connection pooling and pipelining.
@@ -40,5 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmarks for client operations and internal components.
 - Godoc examples for all major APIs.
 
-[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/muxover/bursthttp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/muxover/bursthttp/releases/tag/v0.1.0

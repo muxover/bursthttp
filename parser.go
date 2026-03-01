@@ -229,8 +229,13 @@ func readChunkedBody(r io.Reader, buf []byte, resp *Response, headerEnd, total, 
 		chunkSize := int(chunkSize64)
 
 		if chunkSize == 0 {
-			// Terminal chunk — consume trailing CRLF trailer.
-			_, _ = readLine()
+			// Drain trailers until we reach the blank line (RFC 7230 §4.1).
+			for {
+				line, err := readLine()
+				if err != nil || len(line) == 0 {
+					break
+				}
+			}
 			break
 		}
 

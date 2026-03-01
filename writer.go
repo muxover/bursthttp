@@ -7,7 +7,9 @@ import (
 // writeRequest encodes an HTTP request into buf.
 // host and port are the actual dial target (may differ from cfg.Host when
 // URL-routing is used). useTLS controls whether the default port is omitted.
-func writeRequest(buf []byte, req *Request, cfg *Config, host string, port int, useTLS bool, body []byte, compressed bool) (int, error) {
+// forwardProxy: when true the request line uses absolute-form URI and a
+// Proxy-Authorization header is injected (HTTP forward-proxy mode).
+func writeRequest(buf []byte, req *Request, cfg *Config, host string, port int, useTLS bool, body []byte, compressed bool, forwardProxy bool, proxyAuthHeader []byte) (int, error) {
 	pos := 0
 	method := req.Method
 	if method == "" {
@@ -15,10 +17,22 @@ func writeRequest(buf []byte, req *Request, cfg *Config, host string, port int, 
 	}
 	path := req.effectivePath()
 
-	if !writeString(buf, &pos, method) ||
-		!writeByte(buf, &pos, ' ') ||
-		!writeString(buf, &pos, path) ||
-		!writeString(buf, &pos, " HTTP/1.1\r\n") {
+	// Request line: METHOD <SP> request-target <SP> HTTP/1.1 CRLF
+	if !writeString(buf, &pos, method) || !writeByte(buf, &pos, ' ') {
+		return 0, ErrHeaderBufferSmall
+	}
+	if forwardProxy {
+		// Absolute-form: "http://host[:port]/path"
+		if !writeString(buf, &pos, "http://") || !writeString(buf, &pos, host) {
+			return 0, ErrHeaderBufferSmall
+		}
+		if port > 0 && port != 80 {
+			if !writeByte(buf, &pos, ':') || !writeInt(buf, &pos, port) {
+				return 0, ErrHeaderBufferSmall
+			}
+		}
+	}
+	if !writeString(buf, &pos, path) || !writeString(buf, &pos, " HTTP/1.1\r\n") {
 		return 0, ErrHeaderBufferSmall
 	}
 
@@ -62,6 +76,12 @@ func writeRequest(buf []byte, req *Request, cfg *Config, host string, port int, 
 
 	if req.headerLen > 0 {
 		if !writeBytes(buf, &pos, req.headerBuf[:req.headerLen]) {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+
+	if forwardProxy && len(proxyAuthHeader) > 0 {
+		if !writeBytes(buf, &pos, proxyAuthHeader) {
 			return 0, ErrHeaderBufferSmall
 		}
 	}

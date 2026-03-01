@@ -80,6 +80,10 @@ type Connection struct {
 	maxReqSize     int
 	headerReadSize int
 	bodyReadSize   int
+
+	// Forward-proxy mode: connect to proxy TCP, send absolute-URI requests.
+	isForwardProxy  bool
+	proxyAuthHeader []byte
 }
 
 // ResponseReader is a per-connection goroutine that reads responses in FIFO order.
@@ -121,22 +125,31 @@ func NewConnection(id int, host string, port int, config *Config, dialer *Dialer
 		bodyReadSize = 64 * 1024
 	}
 
+	useTLS := tlsConfig != nil
+	isForwardProxy := dialer != nil && dialer.IsForwardProxy(useTLS)
+	var proxyAuthHeader []byte
+	if isForwardProxy {
+		proxyAuthHeader = dialer.ProxyAuthHeader()
+	}
+
 	c := &Connection{
-		id:             id,
-		host:           host,
-		port:           port,
-		config:         config,
-		dialer:         dialer,
-		tlsConfig:      tlsConfig,
-		compressor:     compressor,
-		pendingReqs:    make([]*PendingRequest, 0, 16),
-		pendingSignal:  make(chan struct{}, 1),
-		readBufSize:    readBufSize,
-		writeBufSize:   writeBufSize,
-		maxRespSize:    maxRespSize,
-		maxReqSize:     maxReqSize,
-		headerReadSize: headerReadSize,
-		bodyReadSize:   bodyReadSize,
+		id:              id,
+		host:            host,
+		port:            port,
+		config:          config,
+		dialer:          dialer,
+		tlsConfig:       tlsConfig,
+		compressor:      compressor,
+		pendingReqs:     make([]*PendingRequest, 0, 16),
+		pendingSignal:   make(chan struct{}, 1),
+		readBufSize:     readBufSize,
+		writeBufSize:    writeBufSize,
+		maxRespSize:     maxRespSize,
+		maxReqSize:      maxReqSize,
+		headerReadSize:  headerReadSize,
+		bodyReadSize:    bodyReadSize,
+		isForwardProxy:  isForwardProxy,
+		proxyAuthHeader: proxyAuthHeader,
 	}
 	c.cachedNow.Store(now)
 	c.lastUsed.Store(now)
@@ -596,36 +609,36 @@ func (c *Connection) ensureConnection() bool {
 }
 
 // connectLocked establishes a TCP (and optionally TLS) connection.
+// A single attempt is made — the pool layer in GetConnection handles retries
+// at a higher level, so retrying here would multiply timeouts unnecessarily
+// (e.g. a 30s proxy CONNECT timeout would become 60s with two attempts).
 func (c *Connection) connectLocked() error {
 	if c.dialer == nil {
 		return WrapError(ErrorTypeNetwork, "dialer is nil", ErrConnectFailed)
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		conn, err := c.dialer.DialAddr(c.host, c.port)
-		if err != nil {
-			if attempt == 1 {
-				return err
-			}
-			continue
-		}
-		if c.tlsConfig != nil {
-			tlsConn, tlsErr := c.tlsConfig.WrapConnection(conn)
-			if tlsErr != nil {
-				conn.Close()
-				if attempt == 1 {
-					return tlsErr
-				}
-				continue
-			}
-			conn = tlsConn
-		}
-		connPtr := &conn
-		c.conn.Store(connPtr)
-		c.reqsOnConn.Store(0)
-		c.healthy.Store(1)
-		return nil
+	var conn net.Conn
+	var err error
+	if c.isForwardProxy {
+		conn, err = c.dialer.DialForward()
+	} else {
+		conn, err = c.dialer.DialAddr(c.host, c.port)
 	}
-	return WrapError(ErrorTypeNetwork, "connection failed after retries", ErrConnectFailed)
+	if err != nil {
+		return err
+	}
+	if c.tlsConfig != nil {
+		tlsConn, tlsErr := c.tlsConfig.WrapConnection(conn)
+		if tlsErr != nil {
+			conn.Close()
+			return tlsErr
+		}
+		conn = tlsConn
+	}
+	connPtr := &conn
+	c.conn.Store(connPtr)
+	c.reqsOnConn.Store(0)
+	c.healthy.Store(1)
+	return nil
 }
 
 // closeConn closes the underlying TCP connection and notifies all pending callers.
@@ -699,7 +712,7 @@ func (c *Connection) writeRequest(conn net.Conn, req *Request, body []byte, comp
 	var n int
 	var encErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		n, encErr = writeRequest(writeBuf, req, c.config, c.host, c.port, c.config.UseTLS, body, compressed)
+		n, encErr = writeRequest(writeBuf, req, c.config, c.host, c.port, c.config.UseTLS, body, compressed, c.isForwardProxy, c.proxyAuthHeader)
 		if encErr == nil {
 			break
 		}

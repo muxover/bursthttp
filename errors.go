@@ -1,9 +1,11 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 )
 
 // Pre-allocated sentinel errors returned by the library.
@@ -21,6 +23,7 @@ var (
 	ErrConnectionClosed  = errors.New("connection closed")
 	ErrProxyFailed       = errors.New("proxy connection failed")
 	ErrInvalidURL        = errors.New("invalid URL")
+	ErrInvalidRequest    = errors.New("invalid request")
 )
 
 // ErrorType represents the category of error for logging and handling.
@@ -87,15 +90,21 @@ func WrapError(errType ErrorType, message string, err error) error {
 }
 
 // IsTimeout checks if an error is a timeout error.
+// It handles net.Error timeouts, context.DeadlineExceeded, ErrTimeout,
+// and DetailedError with ErrorTypeTimeout — including wrapped errors.
 func IsTimeout(err error) bool {
 	if err == nil {
 		return false
 	}
-	if err == ErrTimeout {
+	if errors.Is(err, ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	detailedErr, ok := err.(*DetailedError)
-	if ok && detailedErr.Type == ErrorTypeTimeout {
+	var detailedErr *DetailedError
+	if errors.As(err, &detailedErr) && detailedErr.Type == ErrorTypeTimeout {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
 	return false
@@ -106,12 +115,13 @@ func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if err == ErrConnectFailed || err == ErrWriteFailed || err == ErrReadFailed ||
-		err == ErrConnectionClosed || err == ErrTimeout {
+	if errors.Is(err, ErrConnectFailed) || errors.Is(err, ErrWriteFailed) ||
+		errors.Is(err, ErrReadFailed) || errors.Is(err, ErrConnectionClosed) ||
+		errors.Is(err, ErrTimeout) {
 		return true
 	}
-	detailedErr, ok := err.(*DetailedError)
-	if ok {
+	var detailedErr *DetailedError
+	if errors.As(err, &detailedErr) {
 		return detailedErr.Type == ErrorTypeNetwork || detailedErr.Type == ErrorTypeTimeout
 	}
 	return false

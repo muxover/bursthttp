@@ -29,7 +29,7 @@ func main() {
 
 	fmt.Println("1. GET request")
 	resp, err := client.Get("/get", []bursthttp.Header{
-		{Key: "User-Agent", Value: "bursthttp/0.1.0"},
+		{Key: "User-Agent", Value: "bursthttp/" + bursthttp.GetVersion()},
 	})
 	if err != nil {
 		fmt.Printf("   Error: %v\n", err)

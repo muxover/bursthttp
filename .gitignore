@@ -29,6 +29,9 @@ coverage.html
 cpu.prof
 mem.prof
 
+# Local scratch (do not commit)
+temp-test/
+
 # Environment and secrets
 .env
 .env.*

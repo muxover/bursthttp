@@ -210,8 +210,17 @@ func (p *Pool) GetConnection(key string, useTLS bool) *Connection {
 			return conn
 		}
 		// 2. Try to create a new connection (eagerly connects; returns nil if pool full).
+		// Time the call: if it returns quickly the pool was full (CAS raced); if it
+		// took significant time a real connection attempt was made and failed —
+		// in that case stop retrying immediately to avoid multiplying timeouts
+		// (e.g. a 30s proxy CONNECT timeout × 20 attempts = 600s hang).
+		dialStart := time.Now()
 		if conn := hp.createConnection(); conn != nil {
 			return conn
+		}
+		if time.Since(dialStart) > time.Millisecond {
+			// A real dial was attempted and failed — don't pile on.
+			return nil
 		}
 		// 3. Fall back to any healthy connection, ignoring pipeline capacity.
 		if conn := hp.getAnyConnection(); conn != nil {
