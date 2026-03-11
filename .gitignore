@@ -3,7 +3,7 @@
 Thumbs.db
 desktop.ini
 
-# IDE
+# IDE / editor (do not commit)
 .vscode/
 .idea/
 .cursor/
@@ -11,11 +11,12 @@ desktop.ini
 *.swo
 *~
 
-# Release notes are tracked; build artifacts are not
+# Build / binaries
 *.exe
 *.dll
 *.so
 *.dylib
+dist/
 
 # Go
 /vendor/
@@ -28,8 +29,6 @@ go.work.sum
 coverage.html
 cpu.prof
 mem.prof
-
-# Local scratch (do not commit)
 temp-test/
 
 # Environment and secrets

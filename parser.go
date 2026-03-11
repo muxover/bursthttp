@@ -627,10 +627,89 @@ func containsChunked(b []byte) bool {
 	return false
 }
 
+// headerBytesFromRaw returns the first header value for key as a slice into
+// raw (zero-copy). raw is the full response header block including status line.
+// Returns nil if not found. Case-insensitive key match.
+func headerBytesFromRaw(raw []byte, key string) []byte {
+	if len(raw) == 0 || len(key) == 0 {
+		return nil
+	}
+	// Skip status line (first \r\n).
+	start := 0
+	for i := 0; i+1 < len(raw); i++ {
+		if raw[i] == '\r' && raw[i+1] == '\n' {
+			start = i + 2
+			break
+		}
+	}
+	for start < len(raw) {
+		lineEnd := -1
+		for i := start; i+1 < len(raw); i++ {
+			if raw[i] == '\r' && raw[i+1] == '\n' {
+				lineEnd = i
+				break
+			}
+		}
+		if lineEnd < 0 || lineEnd == start {
+			break
+		}
+		colonPos := -1
+		for i := start; i < lineEnd; i++ {
+			if raw[i] == ':' {
+				colonPos = i
+				break
+			}
+		}
+		if colonPos > start && colonPos < lineEnd {
+			keyStart, keyEnd := start, colonPos
+			for keyStart < keyEnd && (raw[keyStart] == ' ' || raw[keyStart] == '\t') {
+				keyStart++
+			}
+			for keyEnd > keyStart && (raw[keyEnd-1] == ' ' || raw[keyEnd-1] == '\t') {
+				keyEnd--
+			}
+			// Case-insensitive compare of key with raw[keyStart:keyEnd].
+			if keyEnd-keyStart == len(key) {
+				match := true
+				for i := 0; i < len(key); i++ {
+					ca := raw[keyStart+i]
+					if ca >= 'A' && ca <= 'Z' {
+						ca += 32
+					}
+					cb := key[i]
+					if cb >= 'A' && cb <= 'Z' {
+						cb += 32
+					}
+					if ca != cb {
+						match = false
+						break
+					}
+				}
+				if match {
+					valueStart := colonPos + 1
+					valueEnd := lineEnd
+					for valueStart < valueEnd && (raw[valueStart] == ' ' || raw[valueStart] == '\t') {
+						valueStart++
+					}
+					for valueEnd > valueStart && (raw[valueEnd-1] == ' ' || raw[valueEnd-1] == '\t') {
+						valueEnd--
+					}
+					return raw[valueStart:valueEnd]
+				}
+			}
+		}
+		start = lineEnd + 2
+	}
+	return nil
+}
+
 // parseHeaders parses HTTP response headers from the header buffer.
 // Keys and values are copied into Go strings so the caller can freely
 // reuse or recycle buf after this call returns.
+// Also stores a copy of headerBuf in resp.rawHeaderBuf for zero-copy HeaderBytes().
 func parseHeaders(headerBuf []byte, resp *Response) {
+	resp.rawHeaderBuf = make([]byte, len(headerBuf))
+	copy(resp.rawHeaderBuf, headerBuf)
 	// Find the end of the status line (first \r\n).
 	statusLineEnd := -1
 	for i := 0; i+1 < len(headerBuf); i++ {

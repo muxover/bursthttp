@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -705,44 +706,61 @@ func (c *Connection) writeRequest(conn net.Conn, req *Request, body []byte, comp
 		}
 	}
 
-	estimatedSize := len(req.headerBuf) + 512
-	writeBuf := c.getWriteBuf(estimatedSize)
-	defer c.putWriteBuf(writeBuf)
-
-	var n int
-	var encErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		n, encErr = writeRequest(writeBuf, req, c.config, c.host, c.port, c.config.UseTLS, body, compressed, c.isForwardProxy, c.proxyAuthHeader)
-		if encErr == nil {
-			break
-		}
-		if encErr != ErrHeaderBufferSmall {
+	// Pre-encoded path: write prefix + Content-Length line + body (zero-copy for prefix and body).
+	if len(req.PreEncodedHeaderPrefix) > 0 {
+		var clLine [64]byte
+		n := copy(clLine[:], "Content-Length: ")
+		n += copy(clLine[n:], strconv.Itoa(len(body)))
+		n += copy(clLine[n:], "\r\n\r\n")
+		buffers := net.Buffers{req.PreEncodedHeaderPrefix, clLine[:n], body}
+		if _, err := buffers.WriteTo(conn); err != nil {
 			if timeout > 0 {
 				_ = conn.SetWriteDeadline(time.Time{})
 			}
-			return WrapError(ErrorTypeInternal, "encode request failed", encErr)
+			return WrapError(ErrorTypeNetwork, "write pre-encoded request failed", err)
 		}
-		if attempt < 2 {
-			needed := len(writeBuf) * 2
-			if c.config.WriteBufferSize > 0 && needed > c.config.WriteBufferSize {
-				needed = c.config.WriteBufferSize
-			}
-			c.putWriteBuf(writeBuf)
-			writeBuf = c.getWriteBuf(needed)
-		}
-	}
-	if encErr != nil {
 		if timeout > 0 {
 			_ = conn.SetWriteDeadline(time.Time{})
 		}
-		return WrapError(ErrorTypeInternal, "encode request: buffer too small", encErr)
+		return nil
 	}
 
-	if err := writeAllBatched(conn, writeBuf[:n], body); err != nil {
+	// Zero-copy header path: write part1, then headerBuf (no copy), then part3 via net.Buffers.
+	part1Buf := c.getWriteBuf(512)
+	defer c.putWriteBuf(part1Buf)
+	p1, part1Err := writeRequestPart1(part1Buf, req, c.config, c.host, c.port, c.config.UseTLS, compressed, c.isForwardProxy)
+	if part1Err != nil {
+		if timeout > 0 {
+			_ = conn.SetWriteDeadline(time.Time{})
+		}
+		return WrapError(ErrorTypeInternal, "encode request part1 failed", part1Err)
+	}
+	var part3Buf [128]byte
+	p3, part3Err := writeRequestPart3(part3Buf[:], req, len(body), c.proxyAuthHeader)
+	if part3Err != nil {
+		if timeout > 0 {
+			_ = conn.SetWriteDeadline(time.Time{})
+		}
+		return WrapError(ErrorTypeInternal, "encode request part3 failed", part3Err)
+	}
+	var headerBlock []byte
+	if req.headerLen > 0 {
+		headerBlock = req.headerBuf[:req.headerLen]
+	}
+	buffers := net.Buffers{part1Buf[:p1], headerBlock, part3Buf[:p3]}
+	if _, err := buffers.WriteTo(conn); err != nil {
 		if timeout > 0 {
 			_ = conn.SetWriteDeadline(time.Time{})
 		}
 		return WrapError(ErrorTypeNetwork, "write request failed", err)
+	}
+	if len(body) > 0 {
+		if err := writeAll(conn, body); err != nil {
+			if timeout > 0 {
+				_ = conn.SetWriteDeadline(time.Time{})
+			}
+			return WrapError(ErrorTypeNetwork, "write body failed", err)
+		}
 	}
 
 	if timeout > 0 {
