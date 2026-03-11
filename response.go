@@ -16,8 +16,9 @@ type Response struct {
 	Headers       []Header
 
 	// Internal fields
-	bodyBuf []byte
-	maxSize int // Maximum allowed size from config
+	bodyBuf     []byte
+	maxSize     int   // Maximum allowed size from config
+	rawHeaderBuf []byte // Copy of raw header block for zero-copy HeaderBytes(); valid until ReleaseResponse
 }
 
 // AcquireResponse gets a response from the pool.
@@ -88,6 +89,9 @@ func ReleaseResponse(resp *Response) {
 	if len(resp.bodyBuf) > initialResponseBufferSize*2 {
 		resp.bodyBuf = make([]byte, initialResponseBufferSize)
 	}
+	if len(resp.rawHeaderBuf) > 4096 {
+		resp.rawHeaderBuf = nil
+	}
 	responsePool.Put(resp)
 }
 
@@ -98,6 +102,7 @@ func (r *Response) Reset() {
 	r.Body = nil
 	r.Headers = r.Headers[:0]
 	r.maxSize = 0
+	r.rawHeaderBuf = nil
 }
 
 // Header returns the first value for the given header key (case-insensitive).
@@ -131,6 +136,14 @@ func (r *Response) HeaderValues(key string) []string {
 		}
 	}
 	return vals
+}
+
+// HeaderBytes returns the first value for the given header key as a slice into
+// the response's raw header buffer (zero-copy). The slice is valid only until
+// ReleaseResponse is called. Returns nil if the header is not present.
+// Case-insensitive header name match.
+func (r *Response) HeaderBytes(key string) []byte {
+	return headerBytesFromRaw(r.rawHeaderBuf, key)
 }
 
 // isConnectionClose returns true if the response has a Connection: close header.

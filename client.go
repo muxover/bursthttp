@@ -152,6 +152,31 @@ func (c *Client) GracefulStop(timeout time.Duration) bool {
 	return c.pool.GracefulStop(timeout)
 }
 
+// BuildPreEncodedHeaderPrefix encodes the request line and headers (without
+// Content-Length) for the given host/port/useTLS. The returned slice may be
+// stored on Request.PreEncodedHeaderPrefix to send multiple requests with
+// the same headers without re-encoding. Only the body may change between sends.
+// The request must have Method and Path (or URL) set; host and port should
+// match the target used when sending (e.g. from Config or from URL parsing).
+func (c *Client) BuildPreEncodedHeaderPrefix(req *Request, host string, port int, useTLS bool) ([]byte, error) {
+	if req == nil {
+		return nil, ErrInvalidRequest
+	}
+	forwardProxy := c.dialer != nil && c.dialer.IsForwardProxy(useTLS)
+	var proxyAuth []byte
+	if forwardProxy {
+		proxyAuth = c.dialer.ProxyAuthHeader()
+	}
+	buf := make([]byte, 8192)
+	n, err := writeRequestHeaderPrefix(buf, req, c.config, host, port, useTLS, req.Compressed, forwardProxy, proxyAuth)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, n)
+	copy(out, buf[:n])
+	return out, nil
+}
+
 // Do executes an HTTP request using context.Background().
 func (c *Client) Do(req *Request) (*Response, error) {
 	return c.DoWithContext(context.Background(), req)
@@ -472,6 +497,7 @@ func (c *Client) releaseRequest(req *Request) {
 	if len(req.headerBuf) > headerBufSize*2 {
 		req.headerBuf = make([]byte, headerBufSize)
 	}
+	req.PreEncodedHeaderPrefix = nil
 	c.requestPool.Put(req)
 }
 
@@ -493,6 +519,9 @@ func (c *Client) releaseResponse(resp *Response) {
 	}
 	if len(resp.bodyBuf) > initialResponseBufferSize*2 {
 		resp.bodyBuf = make([]byte, initialResponseBufferSize)
+	}
+	if len(resp.rawHeaderBuf) > 4096 {
+		resp.rawHeaderBuf = nil
 	}
 	c.responsePool.Put(resp)
 }

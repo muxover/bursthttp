@@ -4,6 +4,81 @@ import (
 	"net"
 )
 
+// writeRequestHeaderPrefix encodes the request line and all headers up to but
+// not including "Content-Length: N\r\n\r\n". Used for pre-encoded requests:
+// the caller can cache the returned bytes and send multiple requests with
+// the same headers by appending Content-Length and body each time.
+func writeRequestHeaderPrefix(buf []byte, req *Request, cfg *Config, host string, port int, useTLS bool, compressed bool, forwardProxy bool, proxyAuthHeader []byte) (int, error) {
+	pos := 0
+	method := req.Method
+	if method == "" {
+		method = "GET"
+	}
+	path := req.effectivePath()
+
+	if !writeString(buf, &pos, method) || !writeByte(buf, &pos, ' ') {
+		return 0, ErrHeaderBufferSmall
+	}
+	if forwardProxy {
+		if !writeString(buf, &pos, "http://") || !writeString(buf, &pos, host) {
+			return 0, ErrHeaderBufferSmall
+		}
+		if port > 0 && port != 80 {
+			if !writeByte(buf, &pos, ':') || !writeInt(buf, &pos, port) {
+				return 0, ErrHeaderBufferSmall
+			}
+		}
+	}
+	if !writeString(buf, &pos, path) || !writeString(buf, &pos, " HTTP/1.1\r\n") {
+		return 0, ErrHeaderBufferSmall
+	}
+	if !writeString(buf, &pos, "Host: ") || !writeString(buf, &pos, host) {
+		return 0, ErrHeaderBufferSmall
+	}
+	defaultPort := 80
+	if useTLS {
+		defaultPort = 443
+	}
+	if port > 0 && port != defaultPort {
+		if !writeByte(buf, &pos, ':') || !writeInt(buf, &pos, port) {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	if !writeString(buf, &pos, "\r\n") {
+		return 0, ErrHeaderBufferSmall
+	}
+	if cfg.KeepAlive && !cfg.DisableKeepAlive {
+		if !writeString(buf, &pos, "Connection: keep-alive\r\n") {
+			return 0, ErrHeaderBufferSmall
+		}
+	} else {
+		if !writeString(buf, &pos, "Connection: close\r\n") {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	if compressed {
+		if !writeString(buf, &pos, "Content-Encoding: gzip\r\n") {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	if req.headerLen > 0 {
+		if !writeBytes(buf, &pos, req.headerBuf[:req.headerLen]) {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	if forwardProxy && len(proxyAuthHeader) > 0 {
+		if !writeBytes(buf, &pos, proxyAuthHeader) {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	if req.ExpectContinue {
+		if !writeString(buf, &pos, "Expect: 100-continue\r\n") {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	return pos, nil
+}
+
 // writeRequest encodes an HTTP request into buf.
 // host and port are the actual dial target (may differ from cfg.Host when
 // URL-routing is used). useTLS controls whether the default port is omitted.
@@ -99,6 +174,84 @@ func writeRequest(buf []byte, req *Request, cfg *Config, host string, port int, 
 		return 0, ErrHeaderBufferSmall
 	}
 
+	return pos, nil
+}
+
+// writeRequestPart1 writes request line, Host, and Connection (and optional
+// Content-Encoding). Stops before custom headers for zero-copy vectored write.
+func writeRequestPart1(buf []byte, req *Request, cfg *Config, host string, port int, useTLS bool, compressed bool, forwardProxy bool) (int, error) {
+	pos := 0
+	method := req.Method
+	if method == "" {
+		method = "GET"
+	}
+	path := req.effectivePath()
+	if !writeString(buf, &pos, method) || !writeByte(buf, &pos, ' ') {
+		return 0, ErrHeaderBufferSmall
+	}
+	if forwardProxy {
+		if !writeString(buf, &pos, "http://") || !writeString(buf, &pos, host) {
+			return 0, ErrHeaderBufferSmall
+		}
+		if port > 0 && port != 80 {
+			if !writeByte(buf, &pos, ':') || !writeInt(buf, &pos, port) {
+				return 0, ErrHeaderBufferSmall
+			}
+		}
+	}
+	if !writeString(buf, &pos, path) || !writeString(buf, &pos, " HTTP/1.1\r\n") {
+		return 0, ErrHeaderBufferSmall
+	}
+	if !writeString(buf, &pos, "Host: ") || !writeString(buf, &pos, host) {
+		return 0, ErrHeaderBufferSmall
+	}
+	defaultPort := 80
+	if useTLS {
+		defaultPort = 443
+	}
+	if port > 0 && port != defaultPort {
+		if !writeByte(buf, &pos, ':') || !writeInt(buf, &pos, port) {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	if !writeString(buf, &pos, "\r\n") {
+		return 0, ErrHeaderBufferSmall
+	}
+	if cfg.KeepAlive && !cfg.DisableKeepAlive {
+		if !writeString(buf, &pos, "Connection: keep-alive\r\n") {
+			return 0, ErrHeaderBufferSmall
+		}
+	} else {
+		if !writeString(buf, &pos, "Connection: close\r\n") {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	if compressed {
+		if !writeString(buf, &pos, "Content-Encoding: gzip\r\n") {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	return pos, nil
+}
+
+// writeRequestPart3 writes proxy auth (if any), Expect 100-continue (if set),
+// and Content-Length + \r\n\r\n. Used with part1 and headerBuf for zero-copy.
+func writeRequestPart3(buf []byte, req *Request, bodyLen int, proxyAuthHeader []byte) (int, error) {
+	pos := 0
+	if len(proxyAuthHeader) > 0 {
+		if pos+len(proxyAuthHeader) > len(buf) {
+			return 0, ErrHeaderBufferSmall
+		}
+		pos += copy(buf[pos:], proxyAuthHeader)
+	}
+	if req.ExpectContinue && bodyLen > 0 {
+		if !writeString(buf, &pos, "Expect: 100-continue\r\n") {
+			return 0, ErrHeaderBufferSmall
+		}
+	}
+	if !writeString(buf, &pos, "Content-Length: ") || !writeInt(buf, &pos, bodyLen) || !writeString(buf, &pos, "\r\n\r\n") {
+		return 0, ErrHeaderBufferSmall
+	}
 	return pos, nil
 }
 

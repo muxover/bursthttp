@@ -61,6 +61,11 @@ type Request struct {
 	headerLen   int
 	maxBodySize int
 
+	// PreEncodedHeaderPrefix, when non-nil, is the pre-encoded request header
+	// (request line + all headers) up to but not including "Content-Length: N\r\n\r\n".
+	// The connection will append Content-Length and body. Build via BuildPreEncodedHeaderPrefix.
+	PreEncodedHeaderPrefix []byte
+
 	// bodyBuf is the internal scratch buffer for body compression.
 	bodyBuf []byte
 
@@ -127,6 +132,7 @@ func (r *Request) Reset() {
 	r.parsedPort = 0
 	r.parsedTLS = false
 	r.parsedPath = ""
+	r.PreEncodedHeaderPrefix = nil
 }
 
 // WithMethod sets the HTTP method and returns r for chaining.

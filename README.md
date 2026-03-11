@@ -7,9 +7,7 @@
 [![CI](https://github.com/muxover/bursthttp/actions/workflows/ci.yml/badge.svg)](https://github.com/muxover/bursthttp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**High-performance HTTP/1.1 client for Go with pipelining and per-host connection pooling.**
-
-[Features](#-features) • [Installation](#-installation) • [Quick Start](#-quick-start) • [API](#-api-overview) • [Configuration](#-configuration) • [Contributing](#-contributing) • [License](#-license)
+**High-performance Go HTTP/1.1 client with pipelining and pooling.**
 
 </div>
 
@@ -17,7 +15,7 @@
 
 bursthttp is a zero-dependency HTTP/1.1 client built for high-throughput workloads. It pipelines multiple requests over a single TCP connection, pools and reuses connections per host, and recycles request/response objects to minimize allocations. Built-in retry, DNS caching, metrics, streaming, proxy support, and graceful shutdown are included out of the box.
 
-## ✨ Features
+## Features
 
 - **HTTP/1.1 Pipelining** — Send multiple requests on one connection without waiting for responses.
 - **Per-Host Connection Pooling** — Persistent connections with configurable pool size and idle eviction.
@@ -33,9 +31,12 @@ bursthttp is a zero-dependency HTTP/1.1 client built for high-throughput workloa
 - **Connection Warm-Up** — Pre-establish connections before first request.
 - **URL Routing** — Route to multiple hosts from a single client.
 - **Expect: 100-Continue** — Send headers first, body after server confirms.
+- **Pre-encoded requests** — Cache the header block with `BuildPreEncodedHeaderPrefix` and `Request.PreEncodedHeaderPrefix`; send many requests with the same headers without re-encoding.
+- **Lock-free connection pool** — Host lookup via `sync.Map`, connection list via `atomic.Pointer` and CAS (no mutex on the get path).
+- **Header zero-copy** — Request headers sent with vectored write (`net.Buffers`); response header values via `Response.HeaderBytes(key)` as a slice into the raw buffer.
 - **Zero External Dependencies** — Pure Go stdlib.
 
-## 📦 Installation
+## Installation
 
 ```bash
 go get github.com/muxover/bursthttp
@@ -43,7 +44,7 @@ go get github.com/muxover/bursthttp
 
 Requires **Go 1.22+**.
 
-## 🚀 Quick Start
+## Quick Start
 
 ```go
 package main
@@ -77,7 +78,7 @@ func main() {
 }
 ```
 
-## 📋 API Overview
+## API Overview
 
 ### Client Lifecycle
 
@@ -120,6 +121,7 @@ func main() {
 | `resp.Header(key)` | Get first header value (case-insensitive) |
 | `resp.HasHeader(key)` | Check header existence |
 | `resp.HeaderValues(key)` | Get all values for a header |
+| `resp.HeaderBytes(key)` | Get first header value as `[]byte` (zero-copy) |
 
 ### Observability
 
@@ -129,7 +131,7 @@ func main() {
 | `client.Stats()` | Snapshot of client state + metrics |
 | `GetVersion()` | Library version string |
 
-## ⚙️ Configuration
+## Configuration
 
 ### Presets
 
@@ -162,7 +164,7 @@ func main() {
 | `SOCKS5Addr` | `string` | `""` | SOCKS5 proxy address |
 | `Metrics` | `MetricsCollector` | `nil` | Pluggable metrics backend |
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 Client
@@ -181,25 +183,21 @@ Client
   └── Metrics Collector (pluggable)
 ```
 
-## 🤝 Contributing
+## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Open an [issue](https://github.com/muxover/bursthttp/issues) or [pull request](https://github.com/muxover/bursthttp/pulls) on GitHub.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 📄 License
+## License
 
 Licensed under [MIT](LICENSE).
 
-## 🔗 Links
+## Links
 
-- **Repository**: https://github.com/muxover/bursthttp
-- **Issues**: https://github.com/muxover/bursthttp/issues
-- **Changelog**: [CHANGELOG.md](CHANGELOG.md)
-- **Go Reference**: https://pkg.go.dev/github.com/muxover/bursthttp
+- Repository: https://github.com/muxover/bursthttp
+- Issues: https://github.com/muxover/bursthttp/issues
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- Go Reference: https://pkg.go.dev/github.com/muxover/bursthttp
 
 ---
 
-<div align="center">
-
-Made with ❤️ by Jax (@muxover)
-
-</div>
+<p align="center">Made with ❤️ by Jax (@muxover)</p>

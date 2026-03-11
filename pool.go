@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-// Pool manages per-host connection pools.
+// Pool manages per-host connection pools. Host pool lookup and connection list
+// access are lock-free (sync.Map + atomic.Pointer for the connection slice).
 type Pool struct {
-	hostPools  map[string]*HostPool
-	mu         sync.RWMutex
+	hostPools  sync.Map // map[string]*HostPool
 	config     *Config
 	dialer     *Dialer
 	tlsConfig  *TLSConfig
@@ -25,10 +25,10 @@ type Pool struct {
 }
 
 // HostPool manages connections for a single scheme+host+port key.
+// connections is updated with atomic.Pointer for lock-free get path.
 type HostPool struct {
-	connections []*Connection
+	connections atomic.Pointer[[]*Connection]
 	index       atomic.Uint32
-	mu          sync.RWMutex
 
 	maxIdle     int
 	maxActive   int
@@ -45,7 +45,6 @@ type HostPool struct {
 // NewPool creates a new connection pool.
 func NewPool(config *Config, dialer *Dialer, tlsConfig *TLSConfig, compressor *Compressor) *Pool {
 	p := &Pool{
-		hostPools:  make(map[string]*HostPool),
 		config:     config,
 		dialer:     dialer,
 		tlsConfig:  tlsConfig,
@@ -66,16 +65,21 @@ func (p *Pool) Stop() {
 	})
 	p.wg.Wait()
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, hp := range p.hostPools {
-		hp.mu.Lock()
-		for _, c := range hp.connections {
-			c.Stop()
+	var keys []interface{}
+	p.hostPools.Range(func(key, value interface{}) bool {
+		keys = append(keys, key)
+		hp := value.(*HostPool)
+		conns := hp.connections.Swap(nil)
+		if conns != nil {
+			for _, c := range *conns {
+				c.Stop()
+			}
 		}
-		hp.mu.Unlock()
+		return true
+	})
+	for _, k := range keys {
+		p.hostPools.Delete(k)
 	}
-	p.hostPools = make(map[string]*HostPool)
 }
 
 // GracefulStop waits for in-flight requests to complete (up to timeout) before
@@ -99,30 +103,36 @@ func (p *Pool) GracefulStop(timeout time.Duration) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, hp := range p.hostPools {
-		hp.mu.Lock()
-		for _, c := range hp.connections {
-			c.Stop()
+	var keys []interface{}
+	p.hostPools.Range(func(key, value interface{}) bool {
+		keys = append(keys, key)
+		hp := value.(*HostPool)
+		conns := hp.connections.Swap(nil)
+		if conns != nil {
+			for _, c := range *conns {
+				c.Stop()
+			}
 		}
-		hp.mu.Unlock()
+		return true
+	})
+	for _, k := range keys {
+		p.hostPools.Delete(k)
 	}
-	p.hostPools = make(map[string]*HostPool)
 	return true
 }
 
 func (p *Pool) activeRequests() int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	total := 0
-	for _, hp := range p.hostPools {
-		hp.mu.RLock()
-		for _, c := range hp.connections {
-			total += int(c.activeReqs.Load())
+	p.hostPools.Range(func(_, value interface{}) bool {
+		hp := value.(*HostPool)
+		conns := hp.connections.Load()
+		if conns != nil {
+			for _, c := range *conns {
+				total += int(c.activeReqs.Load())
+			}
 		}
-		hp.mu.RUnlock()
-	}
+		return true
+	})
 	return total
 }
 
@@ -164,17 +174,14 @@ func (p *Pool) evictIdleConnections() {
 	now := time.Now().UnixNano()
 	threshold := p.config.IdleTimeout.Nanoseconds()
 
-	p.mu.RLock()
-	pools := make([]*HostPool, 0, len(p.hostPools))
-	for _, hp := range p.hostPools {
-		pools = append(pools, hp)
-	}
-	p.mu.RUnlock()
-
-	for _, hp := range pools {
+	p.hostPools.Range(func(_, value interface{}) bool {
+		hp := value.(*HostPool)
+		conns := hp.connections.Load()
+		if conns == nil {
+			return true
+		}
 		var idle []*Connection
-		hp.mu.RLock()
-		for _, c := range hp.connections {
+		for _, c := range *conns {
 			if c.activeReqs.Load() == 0 && c.IsHealthy() {
 				lastUsed := c.lastUsed.Load()
 				if now-lastUsed > threshold {
@@ -182,11 +189,11 @@ func (p *Pool) evictIdleConnections() {
 				}
 			}
 		}
-		hp.mu.RUnlock()
 		if len(idle) > 0 {
 			hp.removeUnhealthyConnections(idle)
 		}
-	}
+		return true
+	})
 }
 
 // GetConnection returns an available connection for the given pool key.
@@ -237,17 +244,8 @@ func (p *Pool) GetConnection(key string, useTLS bool) *Connection {
 // getHostPool returns (or creates) the HostPool for the given key.
 // key is "scheme://host:port". useTLS determines TLS for newly created pools.
 func (p *Pool) getHostPool(key string, useTLS bool) *HostPool {
-	p.mu.RLock()
-	hp, exists := p.hostPools[key]
-	p.mu.RUnlock()
-	if exists {
-		return hp
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if hp, exists := p.hostPools[key]; exists {
-		return hp
+	if v, ok := p.hostPools.Load(key); ok {
+		return v.(*HostPool)
 	}
 
 	maxIdle := p.config.MaxIdleConnsPerHost
@@ -291,8 +289,8 @@ func (p *Pool) getHostPool(key string, useTLS bool) *HostPool {
 		}
 	}
 
-	hp = &HostPool{
-		connections: make([]*Connection, 0, maxIdle),
+	emptyConns := []*Connection{}
+	hp := &HostPool{
 		maxIdle:     maxIdle,
 		maxActive:   maxActive,
 		pool:        p,
@@ -301,7 +299,11 @@ func (p *Pool) getHostPool(key string, useTLS bool) *HostPool {
 		dialPort:    dialPort,
 		tlsConfig:   tlsCfg,
 	}
-	p.hostPools[key] = hp
+	hp.connections.Store(&emptyConns)
+
+	if v, loaded := p.hostPools.LoadOrStore(key, hp); loaded {
+		return v.(*HostPool)
+	}
 	return hp
 }
 
@@ -338,13 +340,11 @@ func parseHostPort(key, defaultHost string, defaultPort int) (string, int) {
 }
 
 // removeUnhealthyConnections stops and removes a batch of unhealthy connections.
+// Uses CAS to replace the connection slice lock-free.
 func (hp *HostPool) removeUnhealthyConnections(unhealthy []*Connection) {
 	if len(unhealthy) == 0 {
 		return
 	}
-	hp.mu.Lock()
-	defer hp.mu.Unlock()
-
 	useMap := len(unhealthy) > 4
 	var unhealthyMap map[*Connection]bool
 	if useMap {
@@ -354,51 +354,64 @@ func (hp *HostPool) removeUnhealthyConnections(unhealthy []*Connection) {
 		}
 	}
 
-	newConns := hp.connections[:0]
-	removed := 0
-	for _, c := range hp.connections {
-		drop := false
-		if useMap {
-			drop = unhealthyMap[c]
-		} else {
-			for _, u := range unhealthy {
-				if c == u {
-					drop = true
-					break
+	for {
+		old := hp.connections.Load()
+		if old == nil || len(*old) == 0 {
+			break
+		}
+		var newConns []*Connection
+		removed := 0
+		for _, c := range *old {
+			drop := false
+			if useMap {
+				drop = unhealthyMap[c]
+			} else {
+				for _, u := range unhealthy {
+					if c == u {
+						drop = true
+						break
+					}
 				}
 			}
+			if drop {
+				removed++
+			} else {
+				newConns = append(newConns, c)
+			}
 		}
-		if drop {
-			c.Stop()
-			removed++
-		} else {
-			newConns = append(newConns, c)
+		if removed == 0 {
+			break
 		}
-	}
-	hp.connections = newConns
-	if removed > 0 {
-		hp.activeCount.Add(-int32(removed))
-		hp.idleCount.Add(-int32(removed))
+		newPtr := &newConns
+		if hp.connections.CompareAndSwap(old, newPtr) {
+			for _, c := range unhealthy {
+				c.Stop()
+			}
+			hp.activeCount.Add(-int32(removed))
+			hp.idleCount.Add(-int32(removed))
+			break
+		}
 	}
 }
 
 // getIdleConnection returns a healthy, pipeline-ready connection.
 func (hp *HostPool) getIdleConnection() *Connection {
 	for {
-		hp.mu.RLock()
-		connCount := uint32(len(hp.connections))
+		conns := hp.connections.Load()
+		if conns == nil {
+			return nil
+		}
+		connCount := uint32(len(*conns))
 		if connCount == 0 {
-			hp.mu.RUnlock()
 			return nil
 		}
 
 		startIndex := hp.index.Load()
 		firstIndex := startIndex % connCount
-		firstConn := hp.connections[firstIndex]
+		firstConn := (*conns)[firstIndex]
 
 		if firstConn.IsHealthy() && firstConn.CanAcceptRequest() {
 			hp.index.Store((firstIndex + 1) % connCount)
-			hp.mu.RUnlock()
 			return firstConn
 		}
 
@@ -414,7 +427,7 @@ func (hp *HostPool) getIdleConnection() *Connection {
 		var found *Connection
 		for i := uint32(1); i < maxScan; i++ {
 			idx := (startIndex + i) % connCount
-			c := hp.connections[idx]
+			c := (*conns)[idx]
 			if c.IsHealthy() && c.CanAcceptRequest() {
 				hp.index.Store((idx + 1) % connCount)
 				found = c
@@ -423,7 +436,6 @@ func (hp *HostPool) getIdleConnection() *Connection {
 				unhealthy = append(unhealthy, c)
 			}
 		}
-		hp.mu.RUnlock()
 
 		if len(unhealthy) > 0 {
 			hp.removeUnhealthyConnections(unhealthy)
@@ -436,14 +448,12 @@ func (hp *HostPool) getIdleConnection() *Connection {
 		}
 
 		if maxScan < connCount {
-			hp.mu.RLock()
 			unhealthy = unhealthy[:0]
 			for i := maxScan; i < connCount; i++ {
 				idx := (startIndex + i) % connCount
-				c := hp.connections[idx]
+				c := (*conns)[idx]
 				if c.IsHealthy() && c.CanAcceptRequest() {
 					hp.index.Store((idx + 1) % connCount)
-					hp.mu.RUnlock()
 					if len(unhealthy) > 0 {
 						hp.removeUnhealthyConnections(unhealthy)
 					}
@@ -452,7 +462,6 @@ func (hp *HostPool) getIdleConnection() *Connection {
 					unhealthy = append(unhealthy, c)
 				}
 			}
-			hp.mu.RUnlock()
 			if len(unhealthy) > 0 {
 				hp.removeUnhealthyConnections(unhealthy)
 			}
@@ -464,20 +473,21 @@ func (hp *HostPool) getIdleConnection() *Connection {
 // getAnyConnection returns any healthy connection (ignores pipeline capacity).
 func (hp *HostPool) getAnyConnection() *Connection {
 	for {
-		hp.mu.RLock()
-		connCount := uint32(len(hp.connections))
+		conns := hp.connections.Load()
+		if conns == nil {
+			return nil
+		}
+		connCount := uint32(len(*conns))
 		if connCount == 0 {
-			hp.mu.RUnlock()
 			return nil
 		}
 
 		startIndex := hp.index.Load()
 		firstIndex := startIndex % connCount
-		firstConn := hp.connections[firstIndex]
+		firstConn := (*conns)[firstIndex]
 
 		if firstConn.IsHealthy() {
 			hp.index.Store((firstIndex + 1) % connCount)
-			hp.mu.RUnlock()
 			return firstConn
 		}
 
@@ -491,7 +501,7 @@ func (hp *HostPool) getAnyConnection() *Connection {
 		var found *Connection
 		for i := uint32(1); i < maxScan; i++ {
 			idx := (startIndex + i) % connCount
-			c := hp.connections[idx]
+			c := (*conns)[idx]
 			if c.IsHealthy() {
 				hp.index.Store((idx + 1) % connCount)
 				found = c
@@ -500,7 +510,6 @@ func (hp *HostPool) getAnyConnection() *Connection {
 				unhealthy = append(unhealthy, c)
 			}
 		}
-		hp.mu.RUnlock()
 
 		if len(unhealthy) > 0 {
 			hp.removeUnhealthyConnections(unhealthy)
@@ -538,27 +547,37 @@ func (hp *HostPool) createConnection() *Connection {
 		return nil
 	}
 
-	hp.mu.Lock()
-	hp.connections = append(hp.connections, conn)
-	hp.idleCount.Add(1)
-	hp.mu.Unlock()
-
-	return conn
+	for {
+		old := hp.connections.Load()
+		if old == nil {
+			hp.activeCount.Add(-1)
+			return nil
+		}
+		newSlice := make([]*Connection, len(*old)+1)
+		copy(newSlice, *old)
+		newSlice[len(*old)] = conn
+		newPtr := &newSlice
+		if hp.connections.CompareAndSwap(old, newPtr) {
+			hp.idleCount.Add(1)
+			return conn
+		}
+	}
 }
 
 // GetHealthyConnections returns the total healthy connection count across all pools.
 func (p *Pool) GetHealthyConnections() int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	count := 0
-	for _, hp := range p.hostPools {
-		hp.mu.RLock()
-		for _, c := range hp.connections {
-			if c.IsHealthy() {
-				count++
+	p.hostPools.Range(func(_, value interface{}) bool {
+		hp := value.(*HostPool)
+		conns := hp.connections.Load()
+		if conns != nil {
+			for _, c := range *conns {
+				if c.IsHealthy() {
+					count++
+				}
 			}
 		}
-		hp.mu.RUnlock()
-	}
+		return true
+	})
 	return count
 }

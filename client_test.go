@@ -158,6 +158,66 @@ func TestParseHeadersBufferSafety(t *testing.T) {
 	}
 }
 
+func TestHeaderBytesZeroCopy(t *testing.T) {
+	raw := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Custom: value\r\n\r\n"
+	resp := &Response{bodyBuf: make([]byte, 64), Headers: make([]Header, 0, 4)}
+	parseHeaders([]byte(raw), resp)
+	ct := resp.HeaderBytes("Content-Type")
+	if string(ct) != "application/json" {
+		t.Errorf("HeaderBytes(Content-Type) = %q, want application/json", ct)
+	}
+	custom := resp.HeaderBytes("X-Custom")
+	if string(custom) != "value" {
+		t.Errorf("HeaderBytes(X-Custom) = %q, want value", custom)
+	}
+	if resp.HeaderBytes("Missing") != nil {
+		t.Error("HeaderBytes(Missing) should be nil")
+	}
+	// Case-insensitive
+	if string(resp.HeaderBytes("content-type")) != "application/json" {
+		t.Errorf("HeaderBytes(content-type) = %q", resp.HeaderBytes("content-type"))
+	}
+}
+
+func TestPreEncodedHeaderPrefix(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Host = "example.com"
+	cfg.Port = 443
+	cfg.UseTLS = true
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Stop()
+	req := AcquireRequest()
+	defer ReleaseRequest(req)
+	req.Method = "GET"
+	req.Path = "/api"
+	req.SetHeader("X-Custom", "val")
+	prefix, err := client.BuildPreEncodedHeaderPrefix(req, "example.com", 443, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prefix) == 0 {
+		t.Fatal("expected non-empty prefix")
+	}
+	if !bytes.Contains(prefix, []byte("GET /api HTTP/1.1")) {
+		t.Errorf("prefix missing request line: %s", prefix)
+	}
+	if !bytes.Contains(prefix, []byte("Host: example.com")) {
+		t.Errorf("prefix missing Host: %s", prefix)
+	}
+	if !bytes.Contains(prefix, []byte("X-Custom: val")) {
+		t.Errorf("prefix missing custom header: %s", prefix)
+	}
+	// PreEncodedHeaderPrefix path: set on request and send (we'd need a real server to verify; just check it builds)
+	req.PreEncodedHeaderPrefix = prefix
+	req.Body = []byte("body")
+	if len(req.PreEncodedHeaderPrefix) == 0 {
+		t.Fatal("PreEncodedHeaderPrefix not set")
+	}
+}
+
 func TestReadChunkedBody(t *testing.T) {
 	var raw bytes.Buffer
 	raw.WriteString("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")

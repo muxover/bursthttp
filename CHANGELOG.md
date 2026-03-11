@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.1] - 2026-03-06
+## [0.1.2] - 2026-03-11
+
+### Added
+- **Pre-encoded requests**: `Request.PreEncodedHeaderPrefix` and `Client.BuildPreEncodedHeaderPrefix(req, host, port, useTLS)` to cache the request header block and send multiple requests with the same headers without re-encoding; only the body may change between sends.
+- **Lock-free connection pool**: Host pool lookup uses `sync.Map`; per-host connection list uses `atomic.Pointer[[]*Connection]` with CAS for add/remove so the get path is lock-free.
+- **Header zero-copy**: Request headers are sent via `net.Buffers` (vectored write) so custom header bytes are not copied into the main write buffer; response headers support zero-copy access via `Response.HeaderBytes(key)` returning a slice into the raw header buffer (valid until `ReleaseResponse`).
+- Tests: `TestHeaderBytesZeroCopy`, `TestPreEncodedHeaderPrefix`.
+
+### Changed
+- Connection write path uses `writeRequestPart1` + `req.headerBuf` + `writeRequestPart3` with `net.Buffers.WriteTo` for request header zero-copy when `PreEncodedHeaderPrefix` is not set.
+- `parseHeaders` stores a copy of the header block in `Response.rawHeaderBuf` for `HeaderBytes()`.
+
+## [0.1.1] - 2026-03-01
 
 ### Added
 - `ErrInvalidRequest` sentinel error for nil request validation.
@@ -32,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Dead `ReaderRequest` struct and `AddHeader` method from `streaming.go` (unused).
 
-## [0.1.0] - 2026-03-06
+## [0.1.0] - 2026-03-01
 
 ### Added
 - HTTP/1.1 client with persistent connection pooling and pipelining.
@@ -65,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmarks for client operations and internal components.
 - Godoc examples for all major APIs.
 
-[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/muxover/bursthttp/releases/tag/v0.1.2
 [0.1.1]: https://github.com/muxover/bursthttp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/muxover/bursthttp/releases/tag/v0.1.0
