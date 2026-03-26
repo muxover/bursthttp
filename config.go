@@ -66,6 +66,17 @@ type Config struct {
 	EnableDNSCache bool
 	DNSCacheTTL    time.Duration
 
+	// Scheduler: opt-in request scheduler for stable latency under load.
+	// When true, DoWithContext routes through per-host worker queues.
+	EnableScheduler     bool
+	SchedulerWorkers    int // workers per host (default: PoolSize)
+	SchedulerQueueDepth int // max queued requests per host (default: workers*4)
+
+	// Connection health scoring: track per-connection latency EWMA and error
+	// rate; prefer lower-latency connections during pool selection.
+	// Enabled by default.
+	EnableHealthScoring bool
+
 	IdleCheckInterval time.Duration
 
 	EnableResponseStreaming bool
@@ -122,6 +133,10 @@ func DefaultConfig() *Config {
 		RetryableStatus:           []int{429, 502, 503, 504},
 		EnableDNSCache:            false,
 		DNSCacheTTL:               5 * time.Minute,
+		EnableHealthScoring:       true,
+		EnableScheduler:           false,
+		SchedulerWorkers:          0, // 0 = PoolSize
+		SchedulerQueueDepth:       0, // 0 = workers*4
 		IdleCheckInterval:         30 * time.Second,
 		EnableResponseStreaming:   false,
 		TCPNoDelay:                true,
@@ -145,6 +160,8 @@ func HighThroughputConfig() *Config {
 	cfg.TLSClientSessionCacheSize = 8192
 	cfg.EnableDNSCache = true
 	cfg.IdleCheckInterval = 15 * time.Second
+	cfg.EnableHealthScoring = true
+	cfg.EnableScheduler = true
 	return cfg
 }
 

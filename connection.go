@@ -15,6 +15,7 @@ import (
 const (
 	initialConnectionReadBufSize  = 16 * 1024
 	initialConnectionWriteBufSize = 16 * 1024
+	healthWindowSize              = 50 // requests per health-score window
 )
 
 var (
@@ -43,6 +44,7 @@ type PendingRequest struct {
 	// cancelled request's response. This prevents returning resp to the pool
 	// while the ResponseReader still holds a reference to it.
 	releaseFn func(*Response)
+	sentAt    int64 // UnixNano when request was written to wire
 }
 
 // Connection owns a single TCP/TLS connection with optional pipelining.
@@ -62,6 +64,12 @@ type Connection struct {
 	reqsOnConn  atomic.Int32
 	lastUsed    atomic.Int64
 	activeReqs  atomic.Int32
+
+	// Health scoring — updated after each request.
+	latencyEWMA atomic.Int64 // nanoseconds, exponential weighted moving average (α=1/8)
+	errorCount  atomic.Int32 // recent error count (reset every healthWindowSize requests)
+	totalWindow atomic.Int32 // request count in current health window
+	healthScore atomic.Int32 // 0–100; higher is better
 
 	// Connection establishment — serializes concurrent reconnection attempts.
 	connectMu sync.Mutex
@@ -243,6 +251,80 @@ func (c *Connection) CanAcceptRequest() bool {
 	return c.activeReqs.Load() == 0
 }
 
+// recordSuccess updates the EWMA latency and health score after a successful request.
+func (c *Connection) recordSuccess(elapsed time.Duration) {
+	if !c.config.EnableHealthScoring {
+		return
+	}
+	ns := elapsed.Nanoseconds()
+	old := c.latencyEWMA.Load()
+	var newEWMA int64
+	if old == 0 {
+		newEWMA = ns
+	} else {
+		// α = 1/8: newEWMA = old + (sample - old) / 8
+		newEWMA = old + (ns-old)>>3
+	}
+	c.latencyEWMA.Store(newEWMA)
+	c.advanceHealthWindow(false)
+}
+
+// recordError increments the error count in the health window.
+func (c *Connection) recordError() {
+	if !c.config.EnableHealthScoring {
+		return
+	}
+	c.errorCount.Add(1)
+	c.advanceHealthWindow(true)
+}
+
+// advanceHealthWindow ticks the window counter and recomputes health score
+// when the window is full.
+func (c *Connection) advanceHealthWindow(isError bool) {
+	_ = isError
+	total := c.totalWindow.Add(1)
+	if total < healthWindowSize {
+		return
+	}
+	// Window full — recompute score and reset.
+	errors := c.errorCount.Load()
+	c.errorCount.Store(0)
+	c.totalWindow.Store(0)
+
+	score := int32(100)
+
+	// Latency penalty: -1 point per 10ms above 50ms, capped at -60.
+	latMs := c.latencyEWMA.Load() / 1e6
+	if latMs > 50 {
+		penalty := (latMs - 50) / 10
+		if penalty > 60 {
+			penalty = 60
+		}
+		score -= int32(penalty)
+	}
+
+	// Error rate penalty: up to -40 for 100% error rate.
+	if errors > 0 {
+		errPenalty := int32(40) * errors / int32(healthWindowSize)
+		score -= errPenalty
+	}
+
+	if score < 0 {
+		score = 0
+	}
+	c.healthScore.Store(score)
+}
+
+// HealthScore returns the current health score (0–100, higher is better).
+// Returns 100 for new connections with no data yet.
+func (c *Connection) HealthScore() int32 {
+	s := c.healthScore.Load()
+	if s == 0 && c.latencyEWMA.Load() == 0 {
+		return 100 // fresh connection
+	}
+	return s
+}
+
 // Do executes a request on this connection.
 func (c *Connection) Do(req *Request) (*Response, error) {
 	if req == nil {
@@ -260,6 +342,7 @@ func (c *Connection) Do(req *Request) (*Response, error) {
 func (c *Connection) doSequential(req *Request) (*Response, error) {
 	c.activeReqs.Add(1)
 	defer c.activeReqs.Add(-1)
+	reqStart := time.Now()
 
 	if ctxDone := ctxDoneChan(req.ctx); ctxDone != nil {
 		select {
@@ -344,19 +427,23 @@ func (c *Connection) doSequential(req *Request) (*Response, error) {
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			c.healthy.Store(0)
+			c.recordError()
 			return nil, WrapError(ErrorTypeTimeout, "read timeout", err)
 		}
 		if err == io.EOF {
 			c.healthy.Store(0)
+			c.recordError()
 			return nil, WrapError(ErrorTypeNetwork, "connection closed by server", err)
 		}
 		c.healthy.Store(0)
+		c.recordError()
 		return nil, err
 	}
 
 	c.clearDeadlines(conn)
 	c.reqsOnConn.Add(1)
 	c.updateTimeCache()
+	c.recordSuccess(time.Since(reqStart))
 
 	if resp.isConnectionClose() {
 		c.healthy.Store(0)
@@ -449,6 +536,7 @@ func (c *Connection) doPipelined(req *Request) (*Response, error) {
 	}
 
 	// Only add to pending AFTER successful write.
+	pending.sentAt = time.Now().UnixNano()
 	c.pendingReqs = append(c.pendingReqs, pending)
 	c.pendingMu.Unlock()
 
@@ -919,6 +1007,7 @@ func (rr *ResponseReader) run() {
 					continue
 				}
 				// Real error — release resp if we own it.
+				rr.conn.recordError()
 				if wasCancelled && pending.releaseFn != nil {
 					pending.releaseFn(resp)
 				}
@@ -956,6 +1045,9 @@ func (rr *ResponseReader) run() {
 				rr.conn.clearDeadlines(conn)
 				rr.conn.reqsOnConn.Add(1)
 				rr.conn.updateTimeCache()
+				if pending.sentAt > 0 {
+					rr.conn.recordSuccess(time.Duration(time.Now().UnixNano() - pending.sentAt))
+				}
 
 				connClose := resp.isConnectionClose()
 

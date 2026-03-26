@@ -30,6 +30,7 @@ type Client struct {
 	requestPool   *sync.Pool
 	responsePool  *sync.Pool
 	enableLogging bool
+	scheduler     *Scheduler
 }
 
 // NewClient creates a new HTTP client with the given configuration.
@@ -97,7 +98,7 @@ func NewClient(config *Config) (*Client, error) {
 		mc = config.Metrics
 	}
 
-	return &Client{
+	c := &Client{
 		config:        config,
 		pool:          pool,
 		dialer:        dialer,
@@ -108,7 +109,11 @@ func NewClient(config *Config) (*Client, error) {
 		requestPool:   reqPool,
 		responsePool:  respPool,
 		enableLogging: config.EnableLogging,
-	}, nil
+	}
+	if config.EnableScheduler {
+		c.scheduler = NewScheduler(c, config.SchedulerWorkers, config.SchedulerQueueDepth)
+	}
+	return c, nil
 }
 
 // Start pre-establishes connections to the primary host.
@@ -142,6 +147,9 @@ func (c *Client) StartN(n int) error {
 
 // Stop closes all pooled connections immediately.
 func (c *Client) Stop() {
+	if c.scheduler != nil {
+		c.scheduler.Stop()
+	}
 	c.pool.Stop()
 	c.dialer.Stop()
 }
@@ -248,21 +256,28 @@ func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, er
 		resp := c.acquireResponse()
 		req.resp = resp
 
-		conn := c.pool.GetConnection(poolKey, useTLS)
-		if conn == nil {
-			c.releaseResponse(resp)
-			lastErr = LogErrorWithFlag(ErrorTypeInternal, "failed to get connection from pool", ErrConnectFailed, nil, c.enableLogging)
-			if c.metrics != nil {
-				c.metrics.RecordResponse(req.Method, host, 0, lastErr, start, 0, 0)
-			}
-			if c.retryer != nil && c.retryer.ShouldRetry(attempt, nil, lastErr) {
-				continue
-			}
-			return nil, lastErr
-		}
+		var resultResp *Response
+		var err error
 
-		req.releaseFn = c.releaseResponse
-		resultResp, err := conn.Do(req)
+		if c.scheduler != nil {
+			req.releaseFn = c.releaseResponse
+			resultResp, err = c.scheduler.Do(ctx, req, poolKey, useTLS)
+		} else {
+			conn := c.pool.GetConnection(poolKey, useTLS)
+			if conn == nil {
+				c.releaseResponse(resp)
+				lastErr = LogErrorWithFlag(ErrorTypeInternal, "failed to get connection from pool", ErrConnectFailed, nil, c.enableLogging)
+				if c.metrics != nil {
+					c.metrics.RecordResponse(req.Method, host, 0, lastErr, start, 0, 0)
+				}
+				if c.retryer != nil && c.retryer.ShouldRetry(attempt, nil, lastErr) {
+					continue
+				}
+				return nil, lastErr
+			}
+			req.releaseFn = c.releaseResponse
+			resultResp, err = conn.Do(req)
+		}
 		if err != nil {
 			if err == errRespTransferred {
 				return nil, WrapError(ErrorTypeTimeout, "request cancelled", req.ctx.Err())

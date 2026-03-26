@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-03-27
+
+### Added
+- **Request scheduler**: New `Scheduler` type with per-host bounded queue and fixed worker goroutine pool. Replaces the 20×500µs spin-wait loop in `GetConnection` with a blocking channel — stable latency under overload, no busy-wait CPU burn. Opt-in via `config.EnableScheduler`; enabled in `HighThroughputConfig`. Configurable via `SchedulerWorkers` and `SchedulerQueueDepth`.
+- **Async DNS**: In-flight deduplication (singleflight — concurrent misses for the same host share one lookup), background prefetch at 80% TTL, round-robin IP selection via atomic index, stale fallback on DNS errors, janitor at TTL/4 intervals.
+- **Connection health scoring**: Per-connection latency EWMA (α=1/8) and rolling error rate (50-request window) produce a 0–100 health score. `getIdleConnection` scans up to 16 connections and returns the highest-scoring one; short-circuits on score=100. Gated by `config.EnableHealthScoring` (on by default).
+- New config fields: `EnableHealthScoring`, `EnableScheduler`, `SchedulerWorkers`, `SchedulerQueueDepth`.
+- `Connection.HealthScore()` public method returns the current health score.
+
+### Changed
+- `getIdleConnection` scan window increased from 8 to 16 connections; selection is now score-weighted rather than first-available.
+- `HighThroughputConfig` enables `EnableHealthScoring` and `EnableScheduler`.
+
 ## [0.1.2] - 2026-03-11
 
 ### Added
@@ -77,7 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmarks for client operations and internal components.
 - Godoc examples for all major APIs.
 
-[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.2...HEAD
-[0.1.2]: https://github.com/muxover/bursthttp/releases/tag/v0.1.2
-[0.1.1]: https://github.com/muxover/bursthttp/releases/tag/v0.1.1
+[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/muxover/bursthttp/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/muxover/bursthttp/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/muxover/bursthttp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/muxover/bursthttp/releases/tag/v0.1.0

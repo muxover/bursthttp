@@ -394,7 +394,8 @@ func (hp *HostPool) removeUnhealthyConnections(unhealthy []*Connection) {
 	}
 }
 
-// getIdleConnection returns a healthy, pipeline-ready connection.
+// getIdleConnection returns a healthy, pipeline-ready connection, preferring
+// the one with the highest health score among those scanned.
 func (hp *HostPool) getIdleConnection() *Connection {
 	for {
 		conns := hp.connections.Load()
@@ -407,59 +408,66 @@ func (hp *HostPool) getIdleConnection() *Connection {
 		}
 
 		startIndex := hp.index.Load()
-		firstIndex := startIndex % connCount
-		firstConn := (*conns)[firstIndex]
-
-		if firstConn.IsHealthy() && firstConn.CanAcceptRequest() {
-			hp.index.Store((firstIndex + 1) % connCount)
-			return firstConn
-		}
-
-		var unhealthy []*Connection
-		if !firstConn.IsHealthy() {
-			unhealthy = append(unhealthy, firstConn)
-		}
-
 		maxScan := connCount
-		if maxScan > 8 {
-			maxScan = 8
+		if maxScan > 16 {
+			maxScan = 16
 		}
-		var found *Connection
-		for i := uint32(1); i < maxScan; i++ {
+
+		var best *Connection
+		var bestScore int32 = -1
+		var bestIdx uint32
+		var unhealthy []*Connection
+
+		for i := uint32(0); i < maxScan; i++ {
 			idx := (startIndex + i) % connCount
 			c := (*conns)[idx]
-			if c.IsHealthy() && c.CanAcceptRequest() {
-				hp.index.Store((idx + 1) % connCount)
-				found = c
-				break
-			} else if !c.IsHealthy() {
+			if !c.IsHealthy() {
 				unhealthy = append(unhealthy, c)
+				continue
+			}
+			if !c.CanAcceptRequest() {
+				continue
+			}
+			score := c.HealthScore()
+			if best == nil || score > bestScore {
+				best = c
+				bestScore = score
+				bestIdx = idx
+			}
+			// Short-circuit: perfect score, no need to scan more.
+			if score == 100 {
+				break
 			}
 		}
 
 		if len(unhealthy) > 0 {
 			hp.removeUnhealthyConnections(unhealthy)
-			if !firstConn.IsHealthy() && found == nil {
+			if best == nil {
 				continue
 			}
 		}
-		if found != nil {
-			return found
+
+		if best != nil {
+			hp.index.Store((bestIdx + 1) % connCount)
+			return best
 		}
 
+		// Scan remainder of pool if initial window found nothing.
 		if maxScan < connCount {
 			unhealthy = unhealthy[:0]
 			for i := maxScan; i < connCount; i++ {
 				idx := (startIndex + i) % connCount
 				c := (*conns)[idx]
-				if c.IsHealthy() && c.CanAcceptRequest() {
+				if !c.IsHealthy() {
+					unhealthy = append(unhealthy, c)
+					continue
+				}
+				if c.CanAcceptRequest() {
 					hp.index.Store((idx + 1) % connCount)
 					if len(unhealthy) > 0 {
 						hp.removeUnhealthyConnections(unhealthy)
 					}
 					return c
-				} else if !c.IsHealthy() {
-					unhealthy = append(unhealthy, c)
 				}
 			}
 			if len(unhealthy) > 0 {

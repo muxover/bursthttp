@@ -34,6 +34,9 @@ bursthttp is a zero-dependency HTTP/1.1 client built for high-throughput workloa
 - **Pre-encoded requests** — Cache the header block with `BuildPreEncodedHeaderPrefix` and `Request.PreEncodedHeaderPrefix`; send many requests with the same headers without re-encoding.
 - **Lock-free connection pool** — Host lookup via `sync.Map`, connection list via `atomic.Pointer` and CAS (no mutex on the get path).
 - **Header zero-copy** — Request headers sent with vectored write (`net.Buffers`); response header values via `Response.HeaderBytes(key)` as a slice into the raw buffer.
+- **Request Scheduler** — Opt-in per-host bounded queue with worker goroutine pool; replaces spin-wait with a proper blocking queue for stable latency under overload (`EnableScheduler`).
+- **Async DNS** — In-flight deduplication (singleflight), background prefetch at 80% TTL, round-robin IP selection, stale fallback on errors.
+- **Connection Health Scoring** — Per-connection latency EWMA and error rate produce a 0–100 score; pool selection prefers higher-scoring connections (`EnableHealthScoring`).
 - **Zero External Dependencies** — Pure Go stdlib.
 
 ## Installation
@@ -135,11 +138,11 @@ func main() {
 
 ### Presets
 
-| Preset | Pool | Pipeline | Retry | DNS Cache | Use Case |
-|---|---|---|---|---|---|
-| `DefaultConfig()` | 512 | Yes (10) | No | No | General purpose |
-| `HighThroughputConfig()` | 1024 | Yes (16) | No | Yes | 100K+ RPS |
-| `ResilientConfig()` | 512 | Yes (10) | 3 retries | Yes | Unreliable upstreams |
+| Preset | Pool | Pipeline | Retry | DNS Cache | Scheduler | Health Scoring | Use Case |
+|---|---|---|---|---|---|---|---|
+| `DefaultConfig()` | 512 | Yes (10) | No | No | No | Yes | General purpose |
+| `HighThroughputConfig()` | 1024 | Yes (16) | No | Yes | Yes | Yes | 100K+ RPS |
+| `ResilientConfig()` | 512 | Yes (10) | 3 retries | Yes | No | Yes | Unreliable upstreams |
 
 ### Key Fields
 
@@ -163,18 +166,24 @@ func main() {
 | `ProxyURL` | `string` | `""` | HTTP CONNECT proxy |
 | `SOCKS5Addr` | `string` | `""` | SOCKS5 proxy address |
 | `Metrics` | `MetricsCollector` | `nil` | Pluggable metrics backend |
+| `EnableHealthScoring` | `bool` | `true` | Per-connection latency/error scoring |
+| `EnableScheduler` | `bool` | `false` | Per-host request queue + worker pool |
+| `SchedulerWorkers` | `int` | `0` (=PoolSize) | Worker goroutines per host |
+| `SchedulerQueueDepth` | `int` | `0` (=workers×4) | Max queued requests per host |
 
 ## Architecture
 
 ```
 Client
+  ├── Scheduler (optional, per-host queue + worker pool)
   ├── Pool (per-host connection pools)
   │     ├── Connection (pipelined or sequential)
+  │     │     ├── Health Scoring (latency EWMA + error rate)
   │     │     ├── Writer (request serialization)
   │     │     └── Parser (response parsing, chunked decoding)
   │     └── Idle Evictor
   ├── Dialer
-  │     ├── DNS Cache
+  │     ├── DNS Cache (async, prefetch, round-robin)
   │     ├── SOCKS5 Dialer
   │     └── HTTP CONNECT Proxy
   ├── TLS (session caching, handshake timeout)
