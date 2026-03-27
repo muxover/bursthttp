@@ -3,6 +3,7 @@ package client
 import (
 	"net"
 	"strings"
+	"syscall"
 )
 
 // Dialer handles TCP connection establishment with optimised socket settings.
@@ -30,7 +31,7 @@ func NewDialer(config *Config) (*Dialer, error) {
 		}
 	}
 	if config.EnableDNSCache {
-		d.dnsCache = NewDNSCache(config.DNSCacheTTL)
+		d.dnsCache = NewDNSCache(config.DNSCacheTTL, config.DNSNegativeTTL)
 	}
 	return d, nil
 }
@@ -143,6 +144,13 @@ func (d *Dialer) DialAddr(host string, port int) (net.Conn, error) {
 		dialer := &net.Dialer{
 			Timeout:   d.config.DialTimeout,
 			KeepAlive: d.config.TCPKeepAlivePeriod,
+		}
+		if d.config.TCPFastOpen || d.config.TCPReusePort {
+			dialer.Control = func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					applySocketOptions(fd, d.config)
+				})
+			}
 		}
 		conn, err = dialer.Dial("tcp", address)
 		if err != nil {

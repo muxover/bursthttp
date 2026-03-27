@@ -8,11 +8,13 @@ import (
 )
 
 // DNSCache is a thread-safe, TTL-based DNS resolution cache with async refresh,
-// in-flight deduplication, and round-robin IP selection.
+// in-flight deduplication, round-robin IP selection, and negative caching.
 type DNSCache struct {
-	ttl     time.Duration
-	mu      sync.RWMutex
-	entries map[string]*dnsEntry
+	ttl         time.Duration
+	negativeTTL time.Duration
+	mu          sync.RWMutex
+	entries     map[string]*dnsEntry
+	negative    map[string]time.Time // hosts that failed; skip until expiry
 	// in-flight dedup: host → *dnsInflight
 	inflightMu sync.Mutex
 	inflight   map[string]*dnsInflight
@@ -36,15 +38,20 @@ type dnsEntry struct {
 
 // NewDNSCache creates a new DNS cache with the given TTL and starts background
 // prefetch and janitor goroutines.
-func NewDNSCache(ttl time.Duration) *DNSCache {
+func NewDNSCache(ttl time.Duration, negativeTTL time.Duration) *DNSCache {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
+	if negativeTTL <= 0 {
+		negativeTTL = 5 * time.Second
+	}
 	c := &DNSCache{
-		ttl:      ttl,
-		entries:  make(map[string]*dnsEntry),
-		inflight: make(map[string]*dnsInflight),
-		stopCh:   make(chan struct{}),
+		ttl:         ttl,
+		negativeTTL: negativeTTL,
+		entries:     make(map[string]*dnsEntry),
+		negative:    make(map[string]time.Time),
+		inflight:    make(map[string]*dnsInflight),
+		stopCh:      make(chan struct{}),
 	}
 	go c.janitor()
 	return c
@@ -59,8 +66,13 @@ func (c *DNSCache) LookupHost(host string) ([]string, error) {
 	}
 
 	c.mu.RLock()
-	entry, ok := c.entries[host]
 	now := time.Now()
+	// Negative cache: if host recently failed, return error immediately.
+	if negExp, neg := c.negative[host]; neg && now.Before(negExp) {
+		c.mu.RUnlock()
+		return nil, &net.DNSError{Err: "no such host (negative cache)", Name: host, IsNotFound: true}
+	}
+	entry, ok := c.entries[host]
 	if ok && now.Before(entry.expires) {
 		addrs := entry.addrs
 		idx := atomic.AddUint32(&entry.idx, 1) - 1
@@ -110,10 +122,15 @@ func (c *DNSCache) LookupHost(host string) ([]string, error) {
 		if stale != nil {
 			return stale, nil
 		}
+		// Store negative cache entry so we don't hammer DNS on repeated failures.
+		c.mu.Lock()
+		c.negative[host] = time.Now().Add(c.negativeTTL)
+		c.mu.Unlock()
 		return nil, err
 	}
 
 	c.mu.Lock()
+	delete(c.negative, host)
 	c.entries[host] = &dnsEntry{
 		addrs:   addrs,
 		expires: time.Now().Add(c.ttl),
@@ -150,6 +167,7 @@ func (c *DNSCache) backgroundRefresh(host string) {
 	}
 
 	c.mu.Lock()
+	delete(c.negative, host)
 	// Preserve round-robin index if entry already exists.
 	var idx uint32
 	if old, ok := c.entries[host]; ok {
@@ -221,6 +239,7 @@ func (c *DNSCache) janitor() {
 			c.mu.RLock()
 			var expired []string
 			var prefetch []string
+			var expiredNeg []string
 			for host, entry := range c.entries {
 				if now.After(entry.expires) {
 					expired = append(expired, host)
@@ -228,12 +247,20 @@ func (c *DNSCache) janitor() {
 					prefetch = append(prefetch, host)
 				}
 			}
+			for host, exp := range c.negative {
+				if now.After(exp) {
+					expiredNeg = append(expiredNeg, host)
+				}
+			}
 			c.mu.RUnlock()
 
-			if len(expired) > 0 {
+			if len(expired) > 0 || len(expiredNeg) > 0 {
 				c.mu.Lock()
 				for _, host := range expired {
 					delete(c.entries, host)
+				}
+				for _, host := range expiredNeg {
+					delete(c.negative, host)
 				}
 				c.mu.Unlock()
 			}

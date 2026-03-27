@@ -65,6 +65,7 @@ type Config struct {
 
 	EnableDNSCache bool
 	DNSCacheTTL    time.Duration
+	DNSNegativeTTL time.Duration // how long to cache failed lookups (default 5s)
 
 	// Scheduler: opt-in request scheduler for stable latency under load.
 	// When true, DoWithContext routes through per-host worker queues.
@@ -84,6 +85,12 @@ type Config struct {
 	TCPNoDelay         bool
 	TCPKeepAlive       bool
 	TCPKeepAlivePeriod time.Duration
+	TCPFastOpen        bool // Linux only: TCP Fast Open (TFO)
+	TCPReusePort       bool // Linux only: SO_REUSEPORT
+
+	// Pipeline auto-tuning: dynamically adjusts pipeline depth per connection
+	// based on measured round-trip latency. <10ms → grow; >100ms → shrink.
+	EnablePipelineAutoTune bool
 
 	EnableLogging bool
 
@@ -133,6 +140,7 @@ func DefaultConfig() *Config {
 		RetryableStatus:           []int{429, 502, 503, 504},
 		EnableDNSCache:            false,
 		DNSCacheTTL:               5 * time.Minute,
+		DNSNegativeTTL:            5 * time.Second,
 		EnableHealthScoring:       true,
 		EnableScheduler:           false,
 		SchedulerWorkers:          0, // 0 = PoolSize
@@ -162,6 +170,7 @@ func HighThroughputConfig() *Config {
 	cfg.IdleCheckInterval = 15 * time.Second
 	cfg.EnableHealthScoring = true
 	cfg.EnableScheduler = true
+	cfg.EnablePipelineAutoTune = true
 	return cfg
 }
 
@@ -267,6 +276,9 @@ func (c *Config) Validate() error {
 	}
 	if c.DNSCacheTTL <= 0 {
 		c.DNSCacheTTL = 5 * time.Minute
+	}
+	if c.DNSNegativeTTL <= 0 {
+		c.DNSNegativeTTL = 5 * time.Second
 	}
 	if c.IdleCheckInterval <= 0 {
 		c.IdleCheckInterval = 30 * time.Second

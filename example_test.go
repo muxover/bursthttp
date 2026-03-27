@@ -203,7 +203,7 @@ func ExampleNewRetryer() {
 }
 
 func ExampleNewDNSCache() {
-	cache := client.NewDNSCache(5 * time.Minute)
+	cache := client.NewDNSCache(5*time.Minute, 5*time.Second)
 	defer cache.Stop()
 
 	addrs, err := cache.LookupHost("localhost")

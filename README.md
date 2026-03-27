@@ -35,8 +35,10 @@ bursthttp is a zero-dependency HTTP/1.1 client built for high-throughput workloa
 - **Lock-free connection pool** — Host lookup via `sync.Map`, connection list via `atomic.Pointer` and CAS (no mutex on the get path).
 - **Header zero-copy** — Request headers sent with vectored write (`net.Buffers`); response header values via `Response.HeaderBytes(key)` as a slice into the raw buffer.
 - **Request Scheduler** — Opt-in per-host bounded queue with worker goroutine pool; replaces spin-wait with a proper blocking queue for stable latency under overload (`EnableScheduler`).
-- **Async DNS** — In-flight deduplication (singleflight), background prefetch at 80% TTL, round-robin IP selection, stale fallback on errors.
+- **Async DNS** — In-flight deduplication (singleflight), background prefetch at 80% TTL, round-robin IP selection, stale fallback on errors, negative cache for failed lookups (`DNSNegativeTTL`).
 - **Connection Health Scoring** — Per-connection latency EWMA and error rate produce a 0–100 score; pool selection prefers higher-scoring connections (`EnableHealthScoring`).
+- **Pipeline Auto-Tuning** — Pipeline depth adjusts per connection based on measured latency: fast servers get deeper pipelines, slow servers get shallower ones (`EnablePipelineAutoTune`).
+- **TCP socket tuning** — `TCPFastOpen` and `TCPReusePort` on Linux reduce connection setup cost.
 - **Zero External Dependencies** — Pure Go stdlib.
 
 ## Installation
@@ -138,11 +140,11 @@ func main() {
 
 ### Presets
 
-| Preset | Pool | Pipeline | Retry | DNS Cache | Scheduler | Health Scoring | Use Case |
-|---|---|---|---|---|---|---|---|
-| `DefaultConfig()` | 512 | Yes (10) | No | No | No | Yes | General purpose |
-| `HighThroughputConfig()` | 1024 | Yes (16) | No | Yes | Yes | Yes | 100K+ RPS |
-| `ResilientConfig()` | 512 | Yes (10) | 3 retries | Yes | No | Yes | Unreliable upstreams |
+| Preset | Pool | Pipeline | Retry | DNS Cache | Scheduler | Health Scoring | Auto-Tune | Use Case |
+|---|---|---|---|---|---|---|---|---|
+| `DefaultConfig()` | 512 | Yes (10) | No | No | No | Yes | No | General purpose |
+| `HighThroughputConfig()` | 1024 | Yes (auto) | No | Yes | Yes | Yes | Yes | 100K+ RPS |
+| `ResilientConfig()` | 512 | Yes (10) | 3 retries | Yes | No | Yes | No | Unreliable upstreams |
 
 ### Key Fields
 
@@ -155,9 +157,9 @@ func main() {
 | `EnablePipelining` | `bool` | `true` | HTTP/1.1 pipelining |
 | `MaxPipelinedRequests` | `int` | `10` | Pipeline depth per connection |
 | `ReadTimeout` | `Duration` | `30s` | Response read timeout |
-| `WriteTimeout` | `Duration` | `30s` | Request write timeout |
+| `WriteTimeout` | `Duration` | `10s` | Request write timeout |
 | `DialTimeout` | `Duration` | `10s` | TCP connect timeout |
-| `IdleTimeout` | `Duration` | `0` | Idle connection eviction |
+| `IdleTimeout` | `Duration` | `90s` | Idle connection eviction |
 | `MaxRetries` | `int` | `0` | Retry attempts (0 = disabled) |
 | `RetryBaseDelay` | `Duration` | `100ms` | Initial backoff delay |
 | `EnableDNSCache` | `bool` | `false` | In-memory DNS cache |
@@ -170,6 +172,10 @@ func main() {
 | `EnableScheduler` | `bool` | `false` | Per-host request queue + worker pool |
 | `SchedulerWorkers` | `int` | `0` (=PoolSize) | Worker goroutines per host |
 | `SchedulerQueueDepth` | `int` | `0` (=workers×4) | Max queued requests per host |
+| `EnablePipelineAutoTune` | `bool` | `false` | Auto-adjust pipeline depth by latency |
+| `TCPFastOpen` | `bool` | `false` | Linux: TCP Fast Open on connect |
+| `TCPReusePort` | `bool` | `false` | Linux: SO_REUSEPORT on sockets |
+| `DNSNegativeTTL` | `Duration` | `5s` | Cache duration for failed DNS lookups |
 
 ## Architecture
 
@@ -179,11 +185,13 @@ Client
   ├── Pool (per-host connection pools)
   │     ├── Connection (pipelined or sequential)
   │     │     ├── Health Scoring (latency EWMA + error rate)
+  │     │     ├── Pipeline Auto-Tuning (dynamic depth by latency)
   │     │     ├── Writer (request serialization)
   │     │     └── Parser (response parsing, chunked decoding)
   │     └── Idle Evictor
   ├── Dialer
-  │     ├── DNS Cache (async, prefetch, round-robin)
+  │     ├── DNS Cache (async, prefetch, round-robin, negative cache)
+  │     ├── TCP tuning (FastOpen, ReusePort — Linux)
   │     ├── SOCKS5 Dialer
   │     └── HTTP CONNECT Proxy
   ├── TLS (session caching, handshake timeout)

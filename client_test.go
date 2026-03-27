@@ -1390,7 +1390,7 @@ func TestRetryerWaitContextCancel(t *testing.T) {
 // --- DNS Cache ---
 
 func TestDNSCacheLookup(t *testing.T) {
-	cache := NewDNSCache(5 * time.Minute)
+	cache := NewDNSCache(5*time.Minute, 5*time.Second)
 	defer cache.Stop()
 
 	addrs, err := cache.LookupHost("127.0.0.1")
@@ -1416,7 +1416,7 @@ func TestDNSCacheLookup(t *testing.T) {
 }
 
 func TestDNSCacheInvalidate(t *testing.T) {
-	cache := NewDNSCache(5 * time.Minute)
+	cache := NewDNSCache(5*time.Minute, 5*time.Second)
 	defer cache.Stop()
 
 	_, _ = cache.LookupHost("localhost")
@@ -1431,7 +1431,7 @@ func TestDNSCacheInvalidate(t *testing.T) {
 }
 
 func TestDNSCacheClear(t *testing.T) {
-	cache := NewDNSCache(5 * time.Minute)
+	cache := NewDNSCache(5*time.Minute, 5*time.Second)
 	defer cache.Stop()
 
 	_, _ = cache.LookupHost("localhost")
@@ -1446,7 +1446,7 @@ func TestDNSCacheClear(t *testing.T) {
 }
 
 func TestDNSCacheTTLExpiry(t *testing.T) {
-	cache := NewDNSCache(100 * time.Millisecond)
+	cache := NewDNSCache(100*time.Millisecond, 5*time.Second)
 	defer cache.Stop()
 
 	_, _ = cache.LookupHost("localhost")
@@ -1463,7 +1463,7 @@ func TestDNSCacheTTLExpiry(t *testing.T) {
 }
 
 func TestDNSCacheRefresh(t *testing.T) {
-	cache := NewDNSCache(5 * time.Minute)
+	cache := NewDNSCache(5*time.Minute, 5*time.Second)
 	defer cache.Stop()
 
 	addrs, err := cache.Refresh("localhost")
@@ -1483,7 +1483,7 @@ func TestDNSCacheRefresh(t *testing.T) {
 }
 
 func TestConcurrentDNSCache(t *testing.T) {
-	cache := NewDNSCache(5 * time.Minute)
+	cache := NewDNSCache(5*time.Minute, 5*time.Second)
 	defer cache.Stop()
 
 	var wg sync.WaitGroup

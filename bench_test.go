@@ -185,7 +185,7 @@ func BenchmarkRetryerBackoff(b *testing.B) {
 }
 
 func BenchmarkDNSCacheLookup(b *testing.B) {
-	cache := NewDNSCache(5 * time.Minute)
+	cache := NewDNSCache(5*time.Minute, 5*time.Second)
 	defer cache.Stop()
 	_, _ = cache.LookupHost("localhost")
 
@@ -197,7 +197,7 @@ func BenchmarkDNSCacheLookup(b *testing.B) {
 }
 
 func BenchmarkDNSCacheLookupIP(b *testing.B) {
-	cache := NewDNSCache(5 * time.Minute)
+	cache := NewDNSCache(5*time.Minute, 5*time.Second)
 	defer cache.Stop()
 
 	b.ReportAllocs()

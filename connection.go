@@ -66,10 +66,11 @@ type Connection struct {
 	activeReqs  atomic.Int32
 
 	// Health scoring — updated after each request.
-	latencyEWMA atomic.Int64 // nanoseconds, exponential weighted moving average (α=1/8)
-	errorCount  atomic.Int32 // recent error count (reset every healthWindowSize requests)
-	totalWindow atomic.Int32 // request count in current health window
-	healthScore atomic.Int32 // 0–100; higher is better
+	latencyEWMA   atomic.Int64 // nanoseconds, exponential weighted moving average (α=1/8)
+	errorCount    atomic.Int32 // recent error count (reset every healthWindowSize requests)
+	totalWindow   atomic.Int32 // request count in current health window
+	healthScore   atomic.Int32 // 0–100; higher is better
+	pipelineDepth atomic.Int32 // dynamic pipeline depth (auto-tuned when EnablePipelineAutoTune)
 
 	// Connection establishment — serializes concurrent reconnection attempts.
 	connectMu sync.Mutex
@@ -162,6 +163,11 @@ func NewConnection(id int, host string, port int, config *Config, dialer *Dialer
 	}
 	c.cachedNow.Store(now)
 	c.lastUsed.Store(now)
+	depth := int32(config.MaxPipelinedRequests)
+	if depth <= 0 {
+		depth = 10
+	}
+	c.pipelineDepth.Store(depth)
 	return c
 }
 
@@ -242,7 +248,7 @@ func (c *Connection) CanAcceptRequest() bool {
 		return false
 	}
 	if c.config.EnablePipelining {
-		max := c.config.MaxPipelinedRequests
+		max := int(c.pipelineDepth.Load())
 		if max <= 0 {
 			max = 10
 		}
@@ -267,6 +273,41 @@ func (c *Connection) recordSuccess(elapsed time.Duration) {
 	}
 	c.latencyEWMA.Store(newEWMA)
 	c.advanceHealthWindow(false)
+	if c.config.EnablePipelineAutoTune && c.config.EnablePipelining {
+		c.tunePipelineDepth(newEWMA)
+	}
+}
+
+// tunePipelineDepth adjusts the dynamic pipeline depth based on EWMA latency.
+// <10ms → grow toward MaxPipelinedRequests cap (32); >100ms → shrink toward 1.
+func (c *Connection) tunePipelineDepth(ewmaNs int64) {
+	ms := ewmaNs / 1e6
+	cur := c.pipelineDepth.Load()
+	maxDepth := int32(c.config.MaxPipelinedRequests)
+	if maxDepth <= 0 {
+		maxDepth = 10
+	}
+	const hardCap = 32
+	if maxDepth > hardCap {
+		maxDepth = hardCap
+	}
+
+	var target int32
+	switch {
+	case ms < 10:
+		target = cur + 1
+		if target > maxDepth {
+			target = maxDepth
+		}
+	case ms > 100:
+		target = cur - 1
+		if target < 1 {
+			target = 1
+		}
+	default:
+		return // 10–100ms: keep current depth
+	}
+	c.pipelineDepth.Store(target)
 }
 
 // recordError increments the error count in the health window.

@@ -7,12 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-03-27
+
+### Added
+- **TCP Fast Open (`TCPFastOpen`)**: Linux-only socket option that sends data on the first SYN packet, eliminating one round-trip on connection setup. No-op on other platforms.
+- **SO_REUSEPORT (`TCPReusePort`)**: Linux-only socket option for better kernel load distribution across sockets. No-op on other platforms.
+- **Pipeline auto-tuning (`EnablePipelineAutoTune`)**: each connection independently adjusts its pipeline depth based on latency EWMA. <10ms → grows toward `MaxPipelinedRequests` (hard cap 32); >100ms → shrinks toward 1; 10–100ms → unchanged. Enabled in `HighThroughputConfig`.
+- **Negative DNS cache (`DNSNegativeTTL`, default 5s)**: failed `net.LookupHost` calls are cached for `DNSNegativeTTL` so repeated lookups for a bad hostname return immediately. Cleared on subsequent success; janitor evicts expired entries.
+- New config fields: `TCPFastOpen`, `TCPReusePort`, `EnablePipelineAutoTune`, `DNSNegativeTTL`.
+
+### Changed
+- `NewDNSCache` now takes a second `negativeTTL time.Duration` argument.
+- `HighThroughputConfig` enables `EnablePipelineAutoTune`.
+
 ## [0.1.3] - 2026-03-27
 
 ### Added
-- **Request scheduler**: New `Scheduler` type with per-host bounded queue and fixed worker goroutine pool. Replaces the 20×500µs spin-wait loop in `GetConnection` with a blocking channel — stable latency under overload, no busy-wait CPU burn. Opt-in via `config.EnableScheduler`; enabled in `HighThroughputConfig`. Configurable via `SchedulerWorkers` and `SchedulerQueueDepth`.
-- **Async DNS**: In-flight deduplication (singleflight — concurrent misses for the same host share one lookup), background prefetch at 80% TTL, round-robin IP selection via atomic index, stale fallback on DNS errors, janitor at TTL/4 intervals.
-- **Connection health scoring**: Per-connection latency EWMA (α=1/8) and rolling error rate (50-request window) produce a 0–100 health score. `getIdleConnection` scans up to 16 connections and returns the highest-scoring one; short-circuits on score=100. Gated by `config.EnableHealthScoring` (on by default).
+- **Request scheduler**: New `Scheduler` type with per-host bounded queue and fixed worker goroutine pool. When all connections are busy, requests wait in a channel instead of spinning in a 20×500µs retry loop — lower CPU waste and more stable latency under overload. Opt-in via `config.EnableScheduler`; enabled in `HighThroughputConfig`. Configurable via `SchedulerWorkers` and `SchedulerQueueDepth`.
+- **Async DNS**: Concurrent misses for the same host share one `net.LookupHost` call (in-flight deduplication). Results are refreshed in the background at 80% TTL so hot entries never expire on the request path. Round-robin IP selection via atomic index. Stale IPs returned on DNS errors instead of failing. Janitor runs at TTL/4 intervals.
+- **Connection health scoring**: Per-connection latency EWMA (α=1/8) and rolling error rate (50-request window) produce a 0–100 health score. Pool selection scans up to 16 connections and picks the highest-scoring one instead of the first available; short-circuits on score=100. Gated by `config.EnableHealthScoring` (on by default).
 - New config fields: `EnableHealthScoring`, `EnableScheduler`, `SchedulerWorkers`, `SchedulerQueueDepth`.
 - `Connection.HealthScore()` public method returns the current health score.
 
@@ -90,7 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmarks for client operations and internal components.
 - Godoc examples for all major APIs.
 
-[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/muxover/bursthttp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/muxover/bursthttp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/muxover/bursthttp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/muxover/bursthttp/compare/v0.1.0...v0.1.1
