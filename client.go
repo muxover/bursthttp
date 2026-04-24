@@ -232,16 +232,22 @@ func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, er
 	}
 
 	var lastErr error
+	var lastRetryStatus int
+	var lastRetryAfterHdr string
+	var lastRetryErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			if bm, ok := c.metrics.(*BuiltinMetrics); ok {
 				bm.RecordRetry()
 			}
 			if c.retryer != nil {
-				if err := c.retryer.Wait(ctx, attempt-1); err != nil {
+				if err := c.retryer.WaitAdaptive(ctx, attempt-1, lastRetryStatus, lastRetryAfterHdr, lastRetryErr); err != nil {
 					return nil, WrapError(ErrorTypeTimeout, "retry wait cancelled", err)
 				}
 			}
+			lastRetryStatus = 0
+			lastRetryAfterHdr = ""
+			lastRetryErr = nil
 			req.urlParsed = false
 			if req.URL != "" {
 				req.resolveURL()
@@ -271,6 +277,7 @@ func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, er
 					c.metrics.RecordResponse(req.Method, host, 0, lastErr, start, 0, 0)
 				}
 				if c.retryer != nil && c.retryer.ShouldRetry(attempt, nil, lastErr) {
+					lastRetryErr = lastErr
 					continue
 				}
 				return nil, lastErr
@@ -287,6 +294,9 @@ func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, er
 					c.metrics.RecordResponse(req.Method, host, resultResp.StatusCode, err, start, 0, int64(resultResp.ContentLength))
 				}
 				if c.retryer != nil && c.retryer.ShouldRetry(attempt, resultResp, err) {
+					lastRetryStatus = resultResp.StatusCode
+					lastRetryAfterHdr = resultResp.Header("Retry-After")
+					lastRetryErr = err
 					c.releaseResponse(resultResp)
 					lastErr = err
 					continue
@@ -299,6 +309,7 @@ func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, er
 			}
 			lastErr = err
 			if c.retryer != nil && c.retryer.ShouldRetry(attempt, nil, err) {
+				lastRetryErr = err
 				continue
 			}
 			return nil, err
@@ -309,6 +320,8 @@ func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, er
 		}
 
 		if c.retryer != nil && c.retryer.ShouldRetry(attempt, resultResp, nil) {
+			lastRetryStatus = resultResp.StatusCode
+			lastRetryAfterHdr = resultResp.Header("Retry-After")
 			c.releaseResponse(resultResp)
 			continue
 		}

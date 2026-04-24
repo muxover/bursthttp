@@ -1,9 +1,9 @@
 package client
 
 const (
-	Version           = "v0.1.4"
+	Version           = "v0.1.5"
 	VersionMajor      = 0
 	VersionMinor      = 1
-	VersionPatch      = 4
+	VersionPatch      = 5
 	VersionPreRelease = ""
 )

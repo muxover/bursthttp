@@ -20,7 +20,7 @@ bursthttp is a zero-dependency HTTP/1.1 client built for high-throughput workloa
 - **HTTP/1.1 Pipelining** — Send multiple requests on one connection without waiting for responses.
 - **Per-Host Connection Pooling** — Persistent connections with configurable pool size and idle eviction.
 - **Object Pooling** — `sync.Pool`-backed request/response reuse for near-zero allocation.
-- **Retry with Exponential Backoff** — Configurable retries with jitter for transient failures.
+- **Adaptive Retry** — 429 with `Retry-After` header sleeps exactly the server-specified delay; timeout/connection errors retry immediately; 5xx uses exponential backoff with jitter.
 - **DNS Caching** — In-memory resolution cache with TTL.
 - **Pluggable Metrics** — Built-in collector with latency percentiles (p50/p95/p99), byte counters, pool events. Implement `MetricsCollector` for Prometheus/StatsD.
 - **Streaming** — `io.ReadCloser` response bodies and `io.Reader` request bodies.
@@ -39,6 +39,7 @@ bursthttp is a zero-dependency HTTP/1.1 client built for high-throughput workloa
 - **Connection Health Scoring** — Per-connection latency EWMA and error rate produce a 0–100 score; pool selection prefers higher-scoring connections (`EnableHealthScoring`).
 - **Pipeline Auto-Tuning** — Pipeline depth adjusts per connection based on measured latency: fast servers get deeper pipelines, slow servers get shallower ones (`EnablePipelineAutoTune`).
 - **TCP socket tuning** — `TCPFastOpen` and `TCPReusePort` on Linux reduce connection setup cost.
+- **Request Batch API** — `client.Batch(fn)` fans out multiple requests concurrently, collects results in order; `BatchWithContext` propagates a shared context.
 - **Zero External Dependencies** — Pure Go stdlib.
 
 ## Installation
@@ -114,6 +115,8 @@ func main() {
 |---|---|
 | `Do(req)` | Execute a pooled request |
 | `DoWithContext(ctx, req)` | Execute with context cancellation |
+| `Batch(fn)` | Fan-out multiple requests concurrently, results in insertion order |
+| `BatchWithContext(ctx, fn)` | Same with shared context cancellation |
 | `DoStreaming(ctx, req)` | Stream response body as `io.ReadCloser` |
 | `DoReader(ctx, method, path, body, size, headers)` | Send `io.Reader` body |
 | `AcquireRequest()` / `ReleaseRequest(req)` | Pool a request object |
@@ -144,7 +147,7 @@ func main() {
 |---|---|---|---|---|---|---|---|---|
 | `DefaultConfig()` | 512 | Yes (10) | No | No | No | Yes | No | General purpose |
 | `HighThroughputConfig()` | 1024 | Yes (auto) | No | Yes | Yes | Yes | Yes | 100K+ RPS |
-| `ResilientConfig()` | 512 | Yes (10) | 3 retries | Yes | No | Yes | No | Unreliable upstreams |
+| `ResilientConfig()` | 512 | Yes (10) | 3 retries (adaptive) | Yes | No | Yes | No | Unreliable upstreams |
 
 ### Key Fields
 

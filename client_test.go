@@ -2466,3 +2466,357 @@ func TestIsTimeoutNetError(t *testing.T) {
 		t.Errorf("IsTimeout(%v) = false, want true", err)
 	}
 }
+
+// --- Batch API ---
+
+func TestBatchBasic(t *testing.T) {
+	var mu sync.Mutex
+	paths := make([]string, 0)
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(200)
+		fmt.Fprintf(w, "body:%s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, host, port)
+	results := c.Batch(func(b *Batch) {
+		b.Get("/a", nil)
+		b.Get("/b", nil)
+		b.Get("/c", nil)
+	})
+
+	if len(results) != 3 {
+		t.Fatalf("len(results) = %d, want 3", len(results))
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("result[%d] err: %v", i, r.Err)
+		}
+		if r.Response == nil {
+			t.Errorf("result[%d] response is nil", i)
+			continue
+		}
+		if r.Response.StatusCode != 200 {
+			t.Errorf("result[%d] status = %d, want 200", i, r.Response.StatusCode)
+		}
+		if r.Index != i {
+			t.Errorf("result[%d].Index = %d, want %d", i, r.Index, i)
+		}
+		c.ReleaseResponse(r.Response)
+	}
+}
+
+func TestBatchMixedMethods(t *testing.T) {
+	var mu sync.Mutex
+	type hit struct{ method, path string }
+	var hits []hit
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits = append(hits, hit{r.Method, r.URL.Path})
+		mu.Unlock()
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	c := testClient(t, host, port)
+	results := c.Batch(func(b *Batch) {
+		b.Get("/users", nil)
+		b.Post("/login", []byte(`{}`), []Header{{"Content-Type", "application/json"}})
+		b.Delete("/session", nil)
+	})
+
+	if len(results) != 3 {
+		t.Fatalf("len(results) = %d, want 3", len(results))
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("result[%d] err: %v", i, r.Err)
+		}
+		if r.Response != nil {
+			c.ReleaseResponse(r.Response)
+		}
+	}
+}
+
+func TestBatchWithContext(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, host, port)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	results := c.BatchWithContext(ctx, func(b *Batch) {
+		b.Get("/slow", nil)
+		b.Get("/slow2", nil)
+	})
+
+	for i, r := range results {
+		if r.Err == nil {
+			t.Errorf("result[%d]: expected context timeout error, got nil", i)
+			if r.Response != nil {
+				c.ReleaseResponse(r.Response)
+			}
+		}
+	}
+}
+
+func TestBatchNilFn(t *testing.T) {
+	cfg := DefaultConfig()
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	results := c.Batch(nil)
+	if results != nil {
+		t.Errorf("Batch(nil) = %v, want nil", results)
+	}
+}
+
+func TestBatchEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	results := c.Batch(func(b *Batch) {})
+	if results != nil {
+		t.Errorf("Batch with no requests = %v, want nil", results)
+	}
+}
+
+func TestBatchCustomDo(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(202)
+		w.Write([]byte("custom"))
+	}))
+	defer srv.Close()
+
+	c := testClient(t, host, port)
+	req := c.AcquireRequest()
+	req.Method = "GET"
+	req.Path = "/custom"
+
+	results := c.Batch(func(b *Batch) {
+		b.Do(req)
+	})
+	c.ReleaseRequest(req)
+
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].Err != nil {
+		t.Fatalf("err: %v", results[0].Err)
+	}
+	defer c.ReleaseResponse(results[0].Response)
+	if results[0].Response.StatusCode != 202 {
+		t.Errorf("status = %d, want 202", results[0].Response.StatusCode)
+	}
+}
+
+func TestBatchPreservesOrder(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		fmt.Fprint(w, r.URL.Path[1:]) // echo path suffix as body
+	}))
+	defer srv.Close()
+
+	c := testClient(t, host, port)
+	const n = 20
+	results := c.Batch(func(b *Batch) {
+		for i := 0; i < n; i++ {
+			b.Get(fmt.Sprintf("/%d", i), nil)
+		}
+	})
+
+	if len(results) != n {
+		t.Fatalf("len(results) = %d, want %d", len(results), n)
+	}
+	for i, r := range results {
+		if r.Index != i {
+			t.Errorf("result[%d].Index = %d, want %d", i, r.Index, i)
+		}
+		if r.Err != nil {
+			t.Errorf("result[%d] err: %v", i, r.Err)
+			continue
+		}
+		if string(r.Response.Body) != fmt.Sprintf("%d", i) {
+			t.Errorf("result[%d] body = %q, want %q", i, r.Response.Body, fmt.Sprintf("%d", i))
+		}
+		c.ReleaseResponse(r.Response)
+	}
+}
+
+// --- Adaptive retry ---
+
+func TestAdaptiveRetry429WithRetryAfter(t *testing.T) {
+	var attempt atomic.Int64
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempt.Add(1)
+		if n < 3 {
+			w.Header().Set("Retry-After", "0") // 0s → instant
+			w.WriteHeader(429)
+			return
+		}
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.MaxRetries = 3
+	cfg.RetryBaseDelay = 5 * time.Second // would be very slow without adaptive
+	cfg.RetryableStatus = []int{429}
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	start := time.Now()
+	resp, err := c.Get("/", nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer c.ReleaseResponse(resp)
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	// Retry-After: 0 → immediate retry, should finish well under the 5s base delay.
+	if elapsed > 3*time.Second {
+		t.Errorf("adaptive retry took %v, expected near-instant with Retry-After:0", elapsed)
+	}
+}
+
+func TestAdaptiveRetryTimeoutIsImmediate(t *testing.T) {
+	var attempt atomic.Int64
+	// Raw TCP listener that hangs on first connection, responds on subsequent ones.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n := attempt.Add(1)
+			if n == 1 {
+				// First connection: hang to trigger read timeout.
+				time.Sleep(2 * time.Second)
+				conn.Close()
+				continue
+			}
+			// Subsequent: send a valid response.
+			conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+			conn.Close()
+		}
+	}()
+	defer ln.Close()
+
+	addrStr := ln.Addr().String()
+	hostStr, portStr, _ := strings.Cut(addrStr, ":")
+	portNum := 0
+	fmt.Sscanf(portStr, "%d", &portNum)
+
+	cfg := DefaultConfig()
+	cfg.Host = hostStr
+	cfg.Port = portNum
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.PoolSize = 1
+	cfg.MaxRetries = 2
+	cfg.RetryBaseDelay = 10 * time.Second // would be very slow without adaptive
+	cfg.ReadTimeout = 100 * time.Millisecond
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	start := time.Now()
+	resp, err := c.Get("/", nil)
+	elapsed := time.Since(start)
+	// We either get a response from the second attempt or a timeout error.
+	// Either way, adaptive retry must NOT wait the full 10s base delay.
+	if elapsed > 5*time.Second {
+		t.Errorf("timeout retry took %v, expected near-instant (no exponential wait)", elapsed)
+	}
+	if resp != nil {
+		c.ReleaseResponse(resp)
+	}
+	_ = err
+}
+
+// --- parseRetryAfter unit tests ---
+
+func TestParseRetryAfter(t *testing.T) {
+	cases := []struct {
+		input   string
+		want    time.Duration
+		wantOK  bool
+	}{
+		{"0", 0, true},
+		{"1", time.Second, true},
+		{"120", 2 * time.Minute, true},
+		{"  30  ", 30 * time.Second, true},
+		{"garbage", 0, false},
+		{"", 0, false},
+		{"-1", 0, false}, // negative int → Atoi sees n<0 → falls through → unparseable
+	}
+	for _, tc := range cases {
+		got, ok := parseRetryAfter(tc.input)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("parseRetryAfter(%q) = (%v, %v), want (%v, %v)", tc.input, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
+func TestParseRetryAfterHTTPDate(t *testing.T) {
+	// Build a date 60 seconds in the future formatted as HTTP-date.
+	future := time.Now().UTC().Add(60 * time.Second)
+	s := future.Format("Mon, 02 Jan 2006 15:04:05 GMT")
+	got, ok := parseRetryAfter(s)
+	if !ok {
+		t.Fatalf("parseRetryAfter(HTTP-date) ok=false, want true")
+	}
+	// Should be roughly 60s (allow ±2s for test execution).
+	if got < 58*time.Second || got > 62*time.Second {
+		t.Errorf("parseRetryAfter(HTTP-date +60s) = %v, want ~60s", got)
+	}
+}
+
+func TestIsConnectionLevelError(t *testing.T) {
+	if !isConnectionLevelError(WrapError(ErrorTypeNetwork, "dial failed", ErrConnectFailed)) {
+		t.Error("expected network DetailedError to be connection-level")
+	}
+	if !isConnectionLevelError(ErrConnectFailed) {
+		t.Error("expected ErrConnectFailed to be connection-level")
+	}
+	if !isConnectionLevelError(ErrConnectionClosed) {
+		t.Error("expected ErrConnectionClosed to be connection-level")
+	}
+	if isConnectionLevelError(WrapError(ErrorTypeTimeout, "timeout", ErrTimeout)) {
+		t.Error("timeout error should not be connection-level")
+	}
+	if isConnectionLevelError(nil) {
+		t.Error("nil should not be connection-level")
+	}
+}
