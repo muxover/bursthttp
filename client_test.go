@@ -2769,9 +2769,9 @@ func TestAdaptiveRetryTimeoutIsImmediate(t *testing.T) {
 
 func TestParseRetryAfter(t *testing.T) {
 	cases := []struct {
-		input   string
-		want    time.Duration
-		wantOK  bool
+		input  string
+		want   time.Duration
+		wantOK bool
 	}{
 		{"0", 0, true},
 		{"1", time.Second, true},
