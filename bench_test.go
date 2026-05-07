@@ -423,14 +423,14 @@ func BenchmarkVsNetHTTPSequential(b *testing.B) {
 	b.Run("net/http", func(b *testing.B) {
 		srv := httptest.NewServer(handler)
 		defer srv.Close()
-		nc := &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:        64,
-				MaxIdleConnsPerHost: 64,
-				DisableKeepAlives:   false,
-				DisableCompression:  true,
-			},
+		tr := &http.Transport{
+			MaxIdleConns:        1,
+			MaxIdleConnsPerHost: 1,
+			DisableKeepAlives:   false,
+			DisableCompression:  true,
 		}
+		nc := &http.Client{Transport: tr}
+		b.Cleanup(tr.CloseIdleConnections)
 		url := srv.URL + "/"
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -487,14 +487,14 @@ func BenchmarkVsNetHTTPPipelined(b *testing.B) {
 		b.Run(fmt.Sprintf("net/http/p=%d", parallelism), func(b *testing.B) {
 			srv := httptest.NewServer(handler)
 			defer srv.Close()
-			nc := &http.Client{
-				Transport: &http.Transport{
-					MaxIdleConns:        256,
-					MaxIdleConnsPerHost: 256,
-					DisableKeepAlives:   false,
-					DisableCompression:  true,
-				},
+			tr := &http.Transport{
+				MaxIdleConns:        parallelism,
+				MaxIdleConnsPerHost: parallelism,
+				DisableKeepAlives:   false,
+				DisableCompression:  true,
 			}
+			nc := &http.Client{Transport: tr}
+			b.Cleanup(tr.CloseIdleConnections)
 			url := srv.URL + "/"
 			b.SetParallelism(setP)
 			b.ReportAllocs()
@@ -620,8 +620,20 @@ func BenchmarkViaHTTPProxy(b *testing.B) {
 	}))
 	defer origin.Close()
 
+	// Use a pooled transport in the proxy handler so the proxy reuses connections
+	// to the origin instead of dialing a new TCP connection per request.
+	// http.DefaultClient would create a new OS thread per dial on Windows, quickly
+	// hitting the 10000-thread runtime limit under benchmark load.
+	proxyTr := &http.Transport{
+		MaxIdleConns:        8,
+		MaxIdleConnsPerHost: 8,
+		DisableKeepAlives:   false,
+	}
+	proxyClient := &http.Client{Transport: proxyTr}
+	b.Cleanup(proxyTr.CloseIdleConnections)
+
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp, err := http.Get(r.RequestURI)
+		resp, err := proxyClient.Get(r.RequestURI)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
