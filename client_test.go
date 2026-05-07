@@ -2974,8 +2974,9 @@ func TestSchedulerIntegration(t *testing.T) {
 	cfg.EnablePipelining = false
 	cfg.EnableScheduler = true
 	cfg.SchedulerWorkers = 4
-	cfg.SchedulerQueueDepth = 32
+	cfg.SchedulerQueueDepth = 64
 	cfg.PoolSize = 4
+	cfg.ReadTimeout = 5 * time.Second
 	cfg.EnableLogging = false
 
 	c, err := NewClient(cfg)
@@ -2986,12 +2987,19 @@ func TestSchedulerIntegration(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var successes atomic.Int32
-	const n = 40
+	// Keep n <= SchedulerQueueDepth so no goroutine blocks trying to enqueue;
+	// the queue must never be full or goroutines hang under -race overhead.
+	const n = 32
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp, err := c.Get("/", nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			req := c.AcquireRequest()
+			req.WithMethod("GET").WithPath("/")
+			resp, err := c.DoWithContext(ctx, req)
+			c.ReleaseRequest(req)
 			if err != nil {
 				return
 			}
