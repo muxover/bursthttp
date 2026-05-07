@@ -255,7 +255,6 @@ func writeRequestPart3(buf []byte, req *Request, bodyLen int, proxyAuthHeader []
 	return pos, nil
 }
 
-// writeString writes a string to the buffer.
 func writeString(buf []byte, pos *int, s string) bool {
 	if *pos+len(s) > len(buf) {
 		return false
@@ -265,7 +264,6 @@ func writeString(buf []byte, pos *int, s string) bool {
 	return true
 }
 
-// writeBytes writes bytes to the buffer.
 func writeBytes(buf []byte, pos *int, b []byte) bool {
 	if *pos+len(b) > len(buf) {
 		return false
@@ -275,7 +273,6 @@ func writeBytes(buf []byte, pos *int, b []byte) bool {
 	return true
 }
 
-// writeByte writes a byte to the buffer.
 func writeByte(buf []byte, pos *int, b byte) bool {
 	if *pos+1 > len(buf) {
 		return false
@@ -285,7 +282,6 @@ func writeByte(buf []byte, pos *int, b byte) bool {
 	return true
 }
 
-// writeInt writes an integer to the buffer.
 func writeInt(buf []byte, pos *int, n int) bool {
 	if n < 0 {
 		return false

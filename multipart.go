@@ -16,14 +16,12 @@ type MultipartBuilder struct {
 	writer *multipart.Writer
 }
 
-// NewMultipartBuilder creates a new multipart body builder.
 func NewMultipartBuilder() *MultipartBuilder {
 	mb := &MultipartBuilder{}
 	mb.writer = multipart.NewWriter(&mb.buf)
 	return mb
 }
 
-// AddField adds a text form field.
 func (mb *MultipartBuilder) AddField(name, value string) error {
 	return mb.writer.WriteField(name, value)
 }
@@ -64,8 +62,6 @@ func (mb *MultipartBuilder) AddFileFromReader(fieldName, fileName string, reader
 	return err
 }
 
-// ContentType returns the Content-Type header value including the boundary.
-// Must be called after Finish (or at any point for the current boundary).
 func (mb *MultipartBuilder) ContentType() string {
 	return mb.writer.FormDataContentType()
 }

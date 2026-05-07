@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-// Config holds all configuration for the HTTP client.
 // All fields are read-only after initialization for thread safety.
 type Config struct {
 	Host   string
@@ -97,9 +96,14 @@ type Config struct {
 	// Set to a MetricsCollector implementation to receive per-request telemetry.
 	// nil disables metrics (default).
 	Metrics MetricsCollector
+
+	// Traffic shaping: caps outgoing request rate to RequestsPerSecond.
+	// BurstSize controls how many requests may exceed the steady-state rate in
+	// a burst. Both must be > 0 to activate the rate limiter.
+	RequestsPerSecond float64
+	BurstSize         int
 }
 
-// DefaultConfig returns a default configuration optimized for high performance.
 func DefaultConfig() *Config {
 	return &Config{
 		Host:                      "localhost",
@@ -154,7 +158,6 @@ func DefaultConfig() *Config {
 	}
 }
 
-// HighThroughputConfig returns a config tuned for sustained high RPS.
 // Use this for large-scale workloads (100K+ RPS) with adequate hardware.
 func HighThroughputConfig() *Config {
 	cfg := DefaultConfig()
@@ -174,7 +177,6 @@ func HighThroughputConfig() *Config {
 	return cfg
 }
 
-// ResilientConfig returns a config with retry and resilience features enabled.
 func ResilientConfig() *Config {
 	cfg := DefaultConfig()
 	cfg.MaxRetries = 3
@@ -187,7 +189,6 @@ func ResilientConfig() *Config {
 	return cfg
 }
 
-// Validate normalizes and validates the configuration.
 func (c *Config) Validate() error {
 	if c.Host == "" {
 		c.Host = "localhost"
@@ -286,7 +287,6 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// BuildTLSConfig creates a TLS config from the configuration.
 func (c *Config) BuildTLSConfig() *tls.Config {
 	if c.TLSConfig != nil {
 		return c.TLSConfig

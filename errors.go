@@ -47,7 +47,6 @@ type DetailedError struct {
 	Context map[string]interface{}
 }
 
-// Error implements the error interface.
 func (e *DetailedError) Error() string {
 	if e.Err != nil {
 		return fmt.Sprintf("[%s] %s: %v", e.Type, e.Message, e.Err)
@@ -55,7 +54,6 @@ func (e *DetailedError) Error() string {
 	return fmt.Sprintf("[%s] %s", e.Type, e.Message)
 }
 
-// Unwrap returns the underlying error.
 func (e *DetailedError) Unwrap() error {
 	return e.Err
 }
@@ -89,8 +87,7 @@ func WrapError(errType ErrorType, message string, err error) error {
 	}
 }
 
-// IsTimeout checks if an error is a timeout error.
-// It handles net.Error timeouts, context.DeadlineExceeded, ErrTimeout,
+// Handles net.Error timeouts, context.DeadlineExceeded, ErrTimeout,
 // and DetailedError with ErrorTypeTimeout — including wrapped errors.
 func IsTimeout(err error) bool {
 	if err == nil {
@@ -110,7 +107,6 @@ func IsTimeout(err error) bool {
 	return false
 }
 
-// IsRetryable checks if an error is retryable.
 func IsRetryable(err error) bool {
 	if err == nil {
 		return false

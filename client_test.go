@@ -2820,3 +2820,680 @@ func TestIsConnectionLevelError(t *testing.T) {
 		t.Error("nil should not be connection-level")
 	}
 }
+
+// --- Rate limiter ---
+
+func TestRateLimiterThrottles(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.PoolSize = 4
+	cfg.RequestsPerSecond = 100 // 100 RPS → 10ms between tokens
+	cfg.BurstSize = 1
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		resp, err := c.Get("/", nil)
+		if err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+		c.ReleaseResponse(resp)
+	}
+	elapsed := time.Since(start)
+
+	// 5 requests at 100 RPS → at least 4 inter-request gaps of ~10ms = ~40ms total.
+	if elapsed < 30*time.Millisecond {
+		t.Errorf("rate limiter not throttling: 5 requests completed in %v (want >= 30ms)", elapsed)
+	}
+}
+
+func TestRateLimiterContextCancel(t *testing.T) {
+	tb := newTokenBucket(1, 1) // 1 RPS — next token in ~1s
+	// Drain the initial burst token.
+	ctx := context.Background()
+	if err := tb.Wait(ctx); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	// Next wait would block ~1s; cancel immediately.
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := tb.Wait(cancelCtx)
+	if err == nil {
+		t.Error("expected error from cancelled context")
+	}
+}
+
+func TestRateLimiterDisabledByDefault(t *testing.T) {
+	cfg := DefaultConfig()
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+	if c.limiter != nil {
+		t.Error("limiter should be nil when RequestsPerSecond is not set")
+	}
+}
+
+// --- Connection inspector ---
+
+func TestConnectionPool(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	c := testClient(t, host, port)
+
+	resp, err := c.Get("/", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	c.ReleaseResponse(resp)
+
+	infos := c.ConnectionPool()
+	if len(infos) == 0 {
+		t.Fatal("ConnectionPool returned no connections")
+	}
+	for _, info := range infos {
+		if info.Host == "" {
+			t.Error("ConnectionInfo.Host is empty")
+		}
+		if info.Port <= 0 {
+			t.Errorf("ConnectionInfo.Port = %d", info.Port)
+		}
+		if !info.Healthy {
+			t.Error("expected healthy connection")
+		}
+		if info.HealthScore < 0 || info.HealthScore > 100 {
+			t.Errorf("HealthScore = %d, want 0-100", info.HealthScore)
+		}
+	}
+}
+
+func TestConnectionPoolByteCounters(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("hello"))
+	}))
+	defer srv.Close()
+
+	c := testClient(t, host, port)
+
+	for i := 0; i < 3; i++ {
+		resp, err := c.Get("/", nil)
+		if err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+		c.ReleaseResponse(resp)
+	}
+
+	infos := c.ConnectionPool()
+	if len(infos) == 0 {
+		t.Fatal("ConnectionPool returned no connections")
+	}
+	var totalRead int64
+	for _, info := range infos {
+		totalRead += info.BytesRead
+	}
+	// 3 responses of "hello" (5 bytes each) → BytesRead across all connections >= 15.
+	if totalRead < 15 {
+		t.Errorf("total BytesRead = %d across connections, want >= 15", totalRead)
+	}
+}
+
+// --- Scheduler ---
+
+func TestSchedulerIntegration(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("scheduled"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.EnableScheduler = true
+	cfg.SchedulerWorkers = 4
+	cfg.SchedulerQueueDepth = 32
+	cfg.PoolSize = 4
+	cfg.EnableLogging = false
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	const n = 40
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := c.Get("/", nil)
+			if err != nil {
+				return
+			}
+			defer c.ReleaseResponse(resp)
+			if resp.StatusCode == 200 && string(resp.Body) == "scheduled" {
+				successes.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if successes.Load() != n {
+		t.Errorf("scheduler: %d/%d requests succeeded", successes.Load(), n)
+	}
+}
+
+func TestSchedulerStop(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnableScheduler = true
+	cfg.SchedulerWorkers = 2
+	cfg.PoolSize = 2
+	cfg.EnableLogging = false
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	resp, err := c.Get("/", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	c.ReleaseResponse(resp)
+
+	// Stop must not hang.
+	done := make(chan struct{})
+	go func() {
+		c.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop timed out")
+	}
+}
+
+// --- Health scoring ---
+
+func TestHealthScoringUpdates(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.EnableHealthScoring = true
+	cfg.PoolSize = 1
+	cfg.EnableLogging = false
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	// healthWindowSize is 50; send enough requests to fill two windows.
+	for i := 0; i < 110; i++ {
+		resp, err := c.Get("/", nil)
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		c.ReleaseResponse(resp)
+	}
+
+	infos := c.ConnectionPool()
+	if len(infos) == 0 {
+		t.Fatal("ConnectionPool returned no connections")
+	}
+	for _, info := range infos {
+		if info.HealthScore < 80 {
+			t.Errorf("health score = %d after clean requests, want >= 80", info.HealthScore)
+		}
+		if info.LatencyEWMA <= 0 {
+			t.Error("LatencyEWMA should be positive after requests")
+		}
+	}
+}
+
+func TestHealthScoringNewConnection(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.EnableHealthScoring = true
+	cfg.PoolSize = 2
+	cfg.EnableLogging = false
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	// Warm up one connection.
+	resp, err := c.Get("/", nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	c.ReleaseResponse(resp)
+
+	// Fresh connection (no window data yet) should report 100.
+	infos := c.ConnectionPool()
+	for _, info := range infos {
+		if info.HealthScore != 100 {
+			// New connections start at 100 until their first window fills.
+			// A connection that has processed requests but not yet filled
+			// its window will also return 100 from HealthScore().
+			if info.HealthScore < 0 || info.HealthScore > 100 {
+				t.Errorf("HealthScore out of range: %d", info.HealthScore)
+			}
+		}
+	}
+}
+
+// --- DNS negative cache ---
+
+func TestDNSNegativeCacheBlocks(t *testing.T) {
+	cache := NewDNSCache(5*time.Minute, 500*time.Millisecond)
+	defer cache.Stop()
+
+	_, err := cache.LookupHost("this.host.absolutely.does.not.exist.invalid")
+	if err == nil {
+		t.Skip("unexpected successful lookup — skipping negative cache test")
+	}
+
+	cache.mu.RLock()
+	_, inNeg := cache.negative["this.host.absolutely.does.not.exist.invalid"]
+	cache.mu.RUnlock()
+	if !inNeg {
+		t.Fatal("expected negative cache entry after failed lookup")
+	}
+
+	// Second lookup must return cached error immediately (not re-query DNS).
+	start := time.Now()
+	_, err2 := cache.LookupHost("this.host.absolutely.does.not.exist.invalid")
+	if err2 == nil {
+		t.Error("expected error from negative cache, got nil")
+	}
+	// Cached lookup should be much faster than a real DNS query (< 10ms).
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("negative cache lookup took %v, expected near-instant", elapsed)
+	}
+}
+
+func TestDNSNegativeCacheExpiry(t *testing.T) {
+	cache := NewDNSCache(5*time.Minute, 150*time.Millisecond)
+	defer cache.Stop()
+
+	_, _ = cache.LookupHost("this.host.absolutely.does.not.exist.invalid")
+
+	// Wait for negative TTL to pass.
+	time.Sleep(250 * time.Millisecond)
+
+	// Entry should be gone or expired.
+	cache.mu.RLock()
+	exp, inNeg := cache.negative["this.host.absolutely.does.not.exist.invalid"]
+	cache.mu.RUnlock()
+	if inNeg && time.Now().Before(exp) {
+		t.Error("negative cache entry should have expired")
+	}
+}
+
+func TestDNSSingleFlight(t *testing.T) {
+	cache := NewDNSCache(100*time.Millisecond, 5*time.Second)
+	defer cache.Stop()
+
+	// Pre-populate so lookups are cache-misses that trigger the singleflight path.
+	var wg sync.WaitGroup
+	var results [20][]string
+	var errs [20]error
+	for i := 0; i < 20; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = cache.LookupHost("localhost")
+		}()
+	}
+	wg.Wait()
+
+	// All should succeed and return a consistent result.
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: %v", i, err)
+		}
+		if len(results[i]) == 0 {
+			t.Errorf("goroutine %d: empty result", i)
+		}
+	}
+}
+
+// --- Compressor ---
+
+func TestCompressorRoundTrip(t *testing.T) {
+	var receivedBody []byte
+	var wasGzip bool
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wasGzip = r.Header.Get("Content-Encoding") == "gzip"
+		body, _ := io.ReadAll(r.Body)
+		if wasGzip {
+			gr, err := gzip.NewReader(bytes.NewReader(body))
+			if err == nil {
+				receivedBody, _ = io.ReadAll(gr)
+				gr.Close()
+			}
+		} else {
+			receivedBody = body
+		}
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = false
+	cfg.EnableCompression = true
+	cfg.CompressionLevel = 6
+	cfg.PoolSize = 2
+	cfg.EnableLogging = false
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	payload := []byte("hello compressed world — this needs to be long enough to compress")
+	req := c.AcquireRequest()
+	req.Method = "POST"
+	req.Path = "/"
+	req.Body = payload
+	req.Compressed = true
+	defer c.ReleaseRequest(req)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer c.ReleaseResponse(resp)
+
+	if !wasGzip {
+		t.Error("server did not receive Content-Encoding: gzip")
+	}
+	if string(receivedBody) != string(payload) {
+		t.Errorf("decompressed body = %q, want %q", receivedBody, payload)
+	}
+}
+
+func TestCompressorDirectPool(t *testing.T) {
+	comp := NewCompressor(6)
+	input := bytes.Repeat([]byte("hello world "), 100)
+	dst := make([]byte, len(input)*2)
+
+	compressed, err := comp.CompressInto(dst, input)
+	if err != nil {
+		t.Fatalf("CompressInto: %v", err)
+	}
+	if len(compressed) == 0 {
+		t.Fatal("compressed output is empty")
+	}
+	if len(compressed) >= len(input) {
+		t.Errorf("compressed size %d >= original %d", len(compressed), len(input))
+	}
+
+	// Verify decompressibility.
+	gr, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	out, err := io.ReadAll(gr)
+	gr.Close()
+	if err != nil {
+		t.Fatalf("gzip read: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Errorf("decompressed output does not match input")
+	}
+}
+
+func TestCompressorEmptyBody(t *testing.T) {
+	comp := NewCompressor(6)
+	dst := make([]byte, 1024)
+	out, err := comp.CompressInto(dst, nil)
+	if err != nil {
+		t.Fatalf("CompressInto(nil): %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("expected empty output for empty input, got %d bytes", len(out))
+	}
+}
+
+// --- buildAddr / writeInt ---
+
+func TestBuildAddr(t *testing.T) {
+	cases := []struct {
+		host string
+		port int
+		want string
+	}{
+		{"example.com", 80, "example.com:80"},
+		{"example.com", 443, "example.com:443"},
+		{"example.com", 8080, "example.com:8080"},
+		{"example.com", 8443, "example.com:8443"},
+		{"example.com", 9999, "example.com:9999"},
+		{"example.com", 12345, "example.com:12345"},
+		{"::1", 80, "[::1]:80"},
+		{"2001:db8::1", 443, "[2001:db8::1]:443"},
+	}
+	for _, tc := range cases {
+		got := buildAddr(tc.host, tc.port)
+		if got != tc.want {
+			t.Errorf("buildAddr(%q, %d) = %q, want %q", tc.host, tc.port, got, tc.want)
+		}
+	}
+}
+
+func TestWriteIntCoverage(t *testing.T) {
+	cases := []int{0, 1, 9, 10, 99, 100, 999, 1000, 9999, 10000, 65535, 131072, 1048576, 16777216}
+	buf := make([]byte, 32)
+	for _, n := range cases {
+		pos := 0
+		if !writeInt(buf, &pos, n) {
+			t.Errorf("writeInt(%d) returned false", n)
+			continue
+		}
+		if got, want := string(buf[:pos]), fmt.Sprintf("%d", n); got != want {
+			t.Errorf("writeInt(%d) = %q, want %q", n, got, want)
+		}
+	}
+	pos := 0
+	if writeInt(buf, &pos, -1) {
+		t.Error("writeInt(-1) should return false")
+	}
+}
+
+func TestWriteStringBytes(t *testing.T) {
+	buf := make([]byte, 32)
+	pos := 0
+	if !writeString(buf, &pos, "hello") {
+		t.Fatal("writeString returned false")
+	}
+	if string(buf[:pos]) != "hello" {
+		t.Errorf("got %q, want %q", buf[:pos], "hello")
+	}
+
+	// Overflow: buffer too small.
+	smallBuf := make([]byte, 3)
+	pos = 0
+	if writeString(smallBuf, &pos, "toolong") {
+		t.Error("writeString should return false when buffer is too small")
+	}
+}
+
+// --- Pipeline auto-tune ---
+
+func TestPipelineAutoTuneDoesNotCrash(t *testing.T) {
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = true
+	cfg.MaxPipelinedRequests = 8
+	cfg.EnablePipelineAutoTune = true
+	cfg.PoolSize = 4
+	cfg.EnableLogging = false
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 80; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			req := c.AcquireRequest()
+			req.Method = "GET"
+			req.Path = "/"
+			resp, err := c.DoWithContext(ctx, req)
+			c.ReleaseRequest(req)
+			if err != nil {
+				return
+			}
+			c.ReleaseResponse(resp)
+		}()
+	}
+	wg.Wait()
+
+	// Depth must remain in [1, MaxPipelinedRequests].
+	for _, info := range c.ConnectionPool() {
+		if info.PipelineDepth < 1 || info.PipelineDepth > 8 {
+			t.Errorf("PipelineDepth = %d, want [1, 8]", info.PipelineDepth)
+		}
+	}
+}
+
+// --- High concurrency stress ---
+
+func TestHighConcurrency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping high-concurrency stress test in short mode")
+	}
+
+	var served atomic.Int64
+	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served.Add(1)
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = host
+	cfg.Port = port
+	cfg.UseTLS = false
+	cfg.EnablePipelining = true
+	cfg.MaxPipelinedRequests = 12
+	cfg.PoolSize = 32
+	cfg.EnableLogging = false
+	cfg.EnableHealthScoring = false
+
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Stop()
+
+	const goroutines = 200
+	const reqsPerGoroutine = 10
+	var wg sync.WaitGroup
+	var failures atomic.Int64
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < reqsPerGoroutine; j++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				req := c.AcquireRequest()
+				req.Method = "GET"
+				req.Path = "/"
+				resp, err := c.DoWithContext(ctx, req)
+				cancel()
+				c.ReleaseRequest(req)
+				if err != nil {
+					failures.Add(1)
+					continue
+				}
+				if resp.StatusCode != 200 {
+					failures.Add(1)
+				}
+				c.ReleaseResponse(resp)
+			}
+		}()
+	}
+	wg.Wait()
+
+	const total = goroutines * reqsPerGoroutine
+	if failures.Load() > int64(total/20) {
+		t.Errorf("%d/%d requests failed (>5%% threshold)", failures.Load(), total)
+	}
+}

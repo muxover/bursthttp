@@ -27,14 +27,12 @@ type batchEntry struct {
 	owned bool // acquired internally; auto-released after execution
 }
 
-// Do adds a caller-managed request to the batch.
 // The caller retains ownership of req; do not release it until after the Batch call returns.
 func (b *Batch) Do(req *Request) *Batch {
 	b.entries = append(b.entries, batchEntry{req: req})
 	return b
 }
 
-// Get adds a GET request to the batch.
 func (b *Batch) Get(path string, headers []Header) *Batch {
 	req := b.client.acquireRequest()
 	req.Method = "GET"
@@ -46,7 +44,6 @@ func (b *Batch) Get(path string, headers []Header) *Batch {
 	return b
 }
 
-// GetURL adds a GET request for a full URL to the batch.
 func (b *Batch) GetURL(rawURL string, headers []Header) *Batch {
 	req := b.client.acquireRequest()
 	req.Method = "GET"
@@ -58,7 +55,6 @@ func (b *Batch) GetURL(rawURL string, headers []Header) *Batch {
 	return b
 }
 
-// Post adds a POST request to the batch.
 func (b *Batch) Post(path string, body []byte, headers []Header) *Batch {
 	req := b.client.acquireRequest()
 	req.Method = "POST"
@@ -71,7 +67,6 @@ func (b *Batch) Post(path string, body []byte, headers []Header) *Batch {
 	return b
 }
 
-// PostURL adds a POST request for a full URL to the batch.
 func (b *Batch) PostURL(rawURL string, body []byte, headers []Header) *Batch {
 	req := b.client.acquireRequest()
 	req.Method = "POST"
@@ -84,7 +79,6 @@ func (b *Batch) PostURL(rawURL string, body []byte, headers []Header) *Batch {
 	return b
 }
 
-// Put adds a PUT request to the batch.
 func (b *Batch) Put(path string, body []byte, headers []Header) *Batch {
 	req := b.client.acquireRequest()
 	req.Method = "PUT"
@@ -97,7 +91,6 @@ func (b *Batch) Put(path string, body []byte, headers []Header) *Batch {
 	return b
 }
 
-// Patch adds a PATCH request to the batch.
 func (b *Batch) Patch(path string, body []byte, headers []Header) *Batch {
 	req := b.client.acquireRequest()
 	req.Method = "PATCH"
@@ -110,7 +103,6 @@ func (b *Batch) Patch(path string, body []byte, headers []Header) *Batch {
 	return b
 }
 
-// Delete adds a DELETE request to the batch.
 func (b *Batch) Delete(path string, headers []Header) *Batch {
 	req := b.client.acquireRequest()
 	req.Method = "DELETE"

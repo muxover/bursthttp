@@ -465,7 +465,6 @@ func decompressBody(resp *Response) error {
 	return nil
 }
 
-// findHeaderEnd finds the end of HTTP headers (\r\n\r\n).
 func findHeaderEnd(buf []byte) int {
 	if len(buf) < 4 {
 		return -1
@@ -483,7 +482,6 @@ func findHeaderEnd(buf []byte) int {
 	return -1
 }
 
-// parseStatusCode extracts the HTTP status code from the response line.
 // Handles HTTP/1.0 and HTTP/1.1. Returns (code, true) on success.
 func parseStatusCode(buf []byte) (int, bool) {
 	// Minimum: "HTTP/1.1 200" = 12 bytes
@@ -513,7 +511,6 @@ func parseStatusCode(buf []byte) (int, bool) {
 	return code, code >= 100 && code < 600
 }
 
-// parseContentLength extracts Content-Length from headers (case-insensitive).
 func parseContentLength(buf []byte) (int, bool) {
 	const header = "content-length:"
 	const headerLen = len(header)
@@ -562,7 +559,6 @@ func parseContentLength(buf []byte) (int, bool) {
 	return 0, false
 }
 
-// parseTransferEncoding returns true when Transfer-Encoding contains "chunked".
 func parseTransferEncoding(buf []byte) bool {
 	const header = "transfer-encoding:"
 	const headerLen = len(header)
@@ -602,7 +598,6 @@ func parseTransferEncoding(buf []byte) bool {
 	return false
 }
 
-// containsChunked reports whether b contains the token "chunked" (case-insensitive).
 func containsChunked(b []byte) bool {
 	const tok = "chunked"
 	if len(b) < 7 {
@@ -703,7 +698,6 @@ func headerBytesFromRaw(raw []byte, key string) []byte {
 	return nil
 }
 
-// parseHeaders parses HTTP response headers from the header buffer.
 // Keys and values are copied into Go strings so the caller can freely
 // reuse or recycle buf after this call returns.
 // Also stores a copy of headerBuf in resp.rawHeaderBuf for zero-copy HeaderBytes().

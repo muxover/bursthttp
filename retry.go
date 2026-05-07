@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// Retryer executes a request with configurable retry logic.
 // It is created from the client's Config and reused across requests.
 type Retryer struct {
 	maxRetries  int
@@ -20,7 +19,6 @@ type Retryer struct {
 	statusCodes map[int]bool
 }
 
-// NewRetryer creates a Retryer from configuration.
 // Returns nil when retries are disabled (MaxRetries == 0).
 func NewRetryer(config *Config) *Retryer {
 	if config.MaxRetries <= 0 {
@@ -55,7 +53,6 @@ func (r *Retryer) ShouldRetry(attempt int, resp *Response, err error) bool {
 	return false
 }
 
-// Backoff returns the duration to wait before the given retry attempt.
 // Uses exponential backoff with optional jitter.
 func (r *Retryer) Backoff(attempt int) time.Duration {
 	delay := float64(r.baseDelay)
@@ -71,7 +68,6 @@ func (r *Retryer) Backoff(attempt int) time.Duration {
 	return time.Duration(delay)
 }
 
-// Wait sleeps for the backoff duration, returning early if ctx is cancelled.
 // Returns ctx.Err() if the context fires before the backoff elapses.
 func (r *Retryer) Wait(ctx context.Context, attempt int) error {
 	d := r.Backoff(attempt)

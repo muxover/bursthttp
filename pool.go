@@ -42,7 +42,6 @@ type HostPool struct {
 	tlsConfig *TLSConfig // per-pool TLS config (nil for plain HTTP)
 }
 
-// NewPool creates a new connection pool.
 func NewPool(config *Config, dialer *Dialer, tlsConfig *TLSConfig, compressor *Compressor) *Pool {
 	p := &Pool{
 		config:     config,
@@ -58,7 +57,6 @@ func NewPool(config *Config, dialer *Dialer, tlsConfig *TLSConfig, compressor *C
 	return p
 }
 
-// Stop closes every connection in every host pool.
 func (p *Pool) Stop() {
 	p.stopOnce.Do(func() {
 		close(p.stopCh)
@@ -196,7 +194,6 @@ func (p *Pool) evictIdleConnections() {
 	})
 }
 
-// GetConnection returns an available connection for the given pool key.
 // key is "scheme://host:port" (e.g. "https://api.example.com:443").
 // useTLS controls whether new connections use TLS.
 func (p *Pool) GetConnection(key string, useTLS bool) *Connection {
@@ -307,7 +304,6 @@ func (p *Pool) getHostPool(key string, useTLS bool) *HostPool {
 	return hp
 }
 
-// parseHostPort splits "host:port" into parts.
 func parseHostPort(key, defaultHost string, defaultPort int) (string, int) {
 	if key == "" {
 		return defaultHost, defaultPort
@@ -570,6 +566,20 @@ func (hp *HostPool) createConnection() *Connection {
 			return conn
 		}
 	}
+}
+
+func (p *Pool) eachConnection(fn func(host string, c *Connection)) {
+	p.hostPools.Range(func(key, value interface{}) bool {
+		host := key.(string)
+		hp := value.(*HostPool)
+		conns := hp.connections.Load()
+		if conns != nil {
+			for _, c := range *conns {
+				fn(host, c)
+			}
+		}
+		return true
+	})
 }
 
 // GetHealthyConnections returns the total healthy connection count across all pools.

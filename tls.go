@@ -6,14 +6,12 @@ import (
 	"time"
 )
 
-// TLSConfig wraps tls.Config with optimized session caching and connection management.
 type TLSConfig struct {
 	config           *tls.Config
 	handshakeTimeout time.Duration
 	enableLogging    bool
 }
 
-// NewTLSConfig creates a new TLS configuration with session caching enabled.
 func NewTLSConfig(config *Config) *TLSConfig {
 	tlsConfig := config.BuildTLSConfig()
 
@@ -38,7 +36,6 @@ func NewTLSConfig(config *Config) *TLSConfig {
 	}
 }
 
-// WrapConnection performs a TLS handshake over an existing connection.
 // Uses session caching for faster reconnection.
 func (t *TLSConfig) WrapConnection(conn net.Conn) (net.Conn, error) {
 	if conn == nil {

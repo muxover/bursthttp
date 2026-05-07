@@ -40,6 +40,8 @@ bursthttp is a zero-dependency HTTP/1.1 client built for high-throughput workloa
 - **Pipeline Auto-Tuning** — Pipeline depth adjusts per connection based on measured latency: fast servers get deeper pipelines, slow servers get shallower ones (`EnablePipelineAutoTune`).
 - **TCP socket tuning** — `TCPFastOpen` and `TCPReusePort` on Linux reduce connection setup cost.
 - **Request Batch API** — `client.Batch(fn)` fans out multiple requests concurrently, collects results in order; `BatchWithContext` propagates a shared context.
+- **Connection Inspector** — `client.ConnectionPool()` returns a live snapshot of every pooled connection: health score, latency EWMA, in-flight count, pipeline depth, and byte counters.
+- **Token-Bucket Rate Limiter** — `RequestsPerSecond` + `BurstSize` cap outgoing RPS; callers block until a token is available and unblock immediately on context cancellation.
 - **Zero External Dependencies** — Pure Go stdlib.
 
 ## Installation
@@ -137,6 +139,7 @@ func main() {
 |---|---|
 | `client.GetHealthyConnections()` | Count of healthy connections |
 | `client.Stats()` | Snapshot of client state + metrics |
+| `client.ConnectionPool()` | Live snapshot of all pooled connections (`[]ConnectionInfo`) |
 | `GetVersion()` | Library version string |
 
 ## Configuration
@@ -179,16 +182,20 @@ func main() {
 | `TCPFastOpen` | `bool` | `false` | Linux: TCP Fast Open on connect |
 | `TCPReusePort` | `bool` | `false` | Linux: SO_REUSEPORT on sockets |
 | `DNSNegativeTTL` | `Duration` | `5s` | Cache duration for failed DNS lookups |
+| `RequestsPerSecond` | `float64` | `0` | Max outgoing RPS (0 = unlimited) |
+| `BurstSize` | `int` | `0` | Token-bucket burst capacity (0 = disabled) |
 
 ## Architecture
 
 ```
 Client
+  ├── Rate Limiter (token-bucket, optional)
   ├── Scheduler (optional, per-host queue + worker pool)
   ├── Pool (per-host connection pools)
   │     ├── Connection (pipelined or sequential)
   │     │     ├── Health Scoring (latency EWMA + error rate)
   │     │     ├── Pipeline Auto-Tuning (dynamic depth by latency)
+  │     │     ├── Byte Counters (read/written per connection)
   │     │     ├── Writer (request serialization)
   │     │     └── Parser (response parsing, chunked decoding)
   │     └── Idle Evictor

@@ -30,7 +30,6 @@ type Request struct {
 	// Deprecated in favour of URL for multi-host clients.
 	Path string
 
-	// Body is the raw request body.
 	Body []byte
 
 	// Compressed, if true, gzip-compresses Body before sending
@@ -77,7 +76,6 @@ type Request struct {
 	releaseFn func(*Response)
 }
 
-// Header is a single HTTP header key-value pair.
 type Header struct {
 	Key   string
 	Value string
@@ -92,14 +90,12 @@ var requestPool = sync.Pool{
 	},
 }
 
-// AcquireRequest gets a Request from the global pool.
 func AcquireRequest() *Request {
 	req := requestPool.Get().(*Request)
 	req.Reset()
 	return req
 }
 
-// ReleaseRequest returns req to the global pool.
 func ReleaseRequest(req *Request) {
 	if req == nil {
 		return
@@ -135,13 +131,11 @@ func (r *Request) Reset() {
 	r.PreEncodedHeaderPrefix = nil
 }
 
-// WithMethod sets the HTTP method and returns r for chaining.
 func (r *Request) WithMethod(method string) *Request {
 	r.Method = method
 	return r
 }
 
-// WithURL sets the full URL and returns r for chaining.
 // Example: req.WithURL("https://api.example.com/v1/items")
 func (r *Request) WithURL(rawURL string) *Request {
 	r.URL = rawURL
@@ -155,7 +149,6 @@ func (r *Request) WithPath(path string) *Request {
 	return r
 }
 
-// WithBody sets the request body and returns r for chaining.
 func (r *Request) WithBody(body []byte) *Request {
 	r.Body = body
 	return r
@@ -168,7 +161,6 @@ func (r *Request) WithHeader(key, value string) *Request {
 	return r
 }
 
-// WithContext sets the cancellation context and returns r for chaining.
 func (r *Request) WithContext(ctx context.Context) *Request {
 	r.ctx = ctx
 	return r
@@ -186,20 +178,17 @@ func (r *Request) WithWriteTimeout(d time.Duration) *Request {
 	return r
 }
 
-// WithCompression enables gzip compression of the request body.
 func (r *Request) WithCompression() *Request {
 	r.Compressed = true
 	return r
 }
 
-// WithExpectContinue enables the Expect: 100-continue protocol.
-// The client sends headers first, waits for a 100 response, then sends the body.
+// Sends headers first, waits for a 100 response, then sends the body.
 func (r *Request) WithExpectContinue() *Request {
 	r.ExpectContinue = true
 	return r
 }
 
-// SetContext sets the context for the request.
 func (r *Request) SetContext(ctx context.Context) {
 	r.ctx = ctx
 }
@@ -252,7 +241,6 @@ func (r *Request) SetHeader(key, value string) bool {
 	return true
 }
 
-// SetBody sets the request body.
 func (r *Request) SetBody(body []byte) {
 	r.Body = body
 }

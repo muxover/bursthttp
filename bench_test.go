@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -390,6 +391,226 @@ func BenchmarkReadResponse(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	benchmarkClientSerial(b, cfg)
+}
+
+// BenchmarkVsNetHTTP compares bursthttp directly against net/http on identical
+// workloads. Both use keep-alive; the difference is pool/encoding overhead.
+func BenchmarkVsNetHTTPSequential(b *testing.B) {
+	body := []byte("ok")
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write(body)
+	})
+
+	b.Run("bursthttp", func(b *testing.B) {
+		srv := httptest.NewServer(handler)
+		defer srv.Close()
+		host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+		port := 80
+		fmt.Sscanf(portStr, "%d", &port)
+
+		cfg := DefaultConfig()
+		cfg.Host = host
+		cfg.Port = port
+		cfg.UseTLS = false
+		cfg.EnablePipelining = false
+		cfg.PoolSize = 64
+		cfg.EnableLogging = false
+		cfg.EnableHealthScoring = false
+		benchmarkClientSerial(b, cfg)
+	})
+
+	b.Run("net/http", func(b *testing.B) {
+		srv := httptest.NewServer(handler)
+		defer srv.Close()
+		nc := &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        64,
+				MaxIdleConnsPerHost: 64,
+				DisableKeepAlives:   false,
+				DisableCompression:  true,
+			},
+		}
+		url := srv.URL + "/"
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			resp, err := nc.Get(url)
+			if err != nil {
+				b.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	})
+}
+
+// BenchmarkVsNetHTTPPipelined shows bursthttp's pipeline advantage under
+// concurrent load. net/http does not pipeline HTTP/1.1 connections — each
+// goroutine holds a connection exclusively for the full round-trip.
+// bursthttp multiplexes up to MaxPipelinedRequests in-flight per connection,
+// so N goroutines can share far fewer TCP connections without stalling.
+func BenchmarkVsNetHTTPPipelined(b *testing.B) {
+	body := []byte("ok")
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write(body)
+	})
+
+	procs := runtime.GOMAXPROCS(0)
+	for _, parallelism := range []int{4, 16, 64} {
+		parallelism := parallelism
+		// b.SetParallelism(n) launches n*GOMAXPROCS goroutines; divide so the
+		// actual goroutine count equals parallelism regardless of CPU count.
+		setP := max(1, parallelism/procs)
+
+		b.Run(fmt.Sprintf("bursthttp/p=%d", parallelism), func(b *testing.B) {
+			srv := httptest.NewServer(handler)
+			defer srv.Close()
+			host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+			port := 80
+			fmt.Sscanf(portStr, "%d", &port)
+
+			cfg := DefaultConfig()
+			cfg.Host = host
+			cfg.Port = port
+			cfg.UseTLS = false
+			cfg.EnablePipelining = true
+			cfg.MaxPipelinedRequests = 16
+			cfg.PoolSize = 256
+			cfg.EnableLogging = false
+			cfg.EnableHealthScoring = false
+			b.SetParallelism(setP)
+			benchmarkClientParallel(b, cfg)
+		})
+
+		b.Run(fmt.Sprintf("net/http/p=%d", parallelism), func(b *testing.B) {
+			srv := httptest.NewServer(handler)
+			defer srv.Close()
+			nc := &http.Client{
+				Transport: &http.Transport{
+					MaxIdleConns:        256,
+					MaxIdleConnsPerHost: 256,
+					DisableKeepAlives:   false,
+					DisableCompression:  true,
+				},
+			}
+			url := srv.URL + "/"
+			b.SetParallelism(setP)
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					resp, err := nc.Get(url)
+					if err != nil {
+						b.Error(err)
+						return
+					}
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+			})
+		})
+	}
+}
+
+// BenchmarkPreEncodedVsRegular demonstrates the hot-path win from
+// BuildPreEncodedHeaderPrefix. The prefix (request line + all headers) is
+// encoded once; subsequent sends skip all string formatting and buffer copies,
+// reducing allocations to near zero on the critical path.
+func BenchmarkPreEncodedVsRegular(b *testing.B) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	})
+
+	b.Run("regular", func(b *testing.B) {
+		srv := httptest.NewServer(handler)
+		defer srv.Close()
+		host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+		port := 80
+		fmt.Sscanf(portStr, "%d", &port)
+
+		cfg := DefaultConfig()
+		cfg.Host = host
+		cfg.Port = port
+		cfg.UseTLS = false
+		cfg.EnablePipelining = false
+		cfg.PoolSize = 8
+		cfg.EnableLogging = false
+		cfg.EnableHealthScoring = false
+		c, err := NewClient(cfg)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer c.Stop()
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			req := c.AcquireRequest()
+			req.Method = "GET"
+			req.Path = "/api/v1/events"
+			req.SetHeader("Authorization", "Bearer token-abc123")
+			req.SetHeader("Accept", "application/json")
+			req.SetHeader("X-Trace-ID", "trace-xyz-789")
+			resp, err := c.Do(req)
+			c.ReleaseRequest(req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			c.ReleaseResponse(resp)
+		}
+	})
+
+	b.Run("pre-encoded", func(b *testing.B) {
+		srv := httptest.NewServer(handler)
+		defer srv.Close()
+		host, portStr, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+		port := 80
+		fmt.Sscanf(portStr, "%d", &port)
+
+		cfg := DefaultConfig()
+		cfg.Host = host
+		cfg.Port = port
+		cfg.UseTLS = false
+		cfg.EnablePipelining = false
+		cfg.PoolSize = 8
+		cfg.EnableLogging = false
+		cfg.EnableHealthScoring = false
+		c, err := NewClient(cfg)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer c.Stop()
+
+		seed := c.AcquireRequest()
+		seed.Method = "GET"
+		seed.Path = "/api/v1/events"
+		seed.SetHeader("Authorization", "Bearer token-abc123")
+		seed.SetHeader("Accept", "application/json")
+		seed.SetHeader("X-Trace-ID", "trace-xyz-789")
+		prefix, err := c.BuildPreEncodedHeaderPrefix(seed, host, port, false)
+		c.ReleaseRequest(seed)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			req := c.AcquireRequest()
+			req.Method = "GET"
+			req.Path = "/api/v1/events"
+			req.PreEncodedHeaderPrefix = prefix
+			resp, err := c.Do(req)
+			c.ReleaseRequest(req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			c.ReleaseResponse(resp)
+		}
+	})
 }
 
 func BenchmarkViaHTTPProxy(b *testing.B) {

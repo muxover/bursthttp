@@ -41,7 +41,6 @@ type Scheduler struct {
 	stopOnce sync.Once
 }
 
-// NewScheduler creates a Scheduler backed by the given client.
 // workers is the number of worker goroutines per host (default: PoolSize).
 // queueCap is the max queued requests per host before Do blocks (default: workers*4).
 func NewScheduler(client *Client, workers, queueCap int) *Scheduler {
@@ -138,7 +137,6 @@ func (s *Scheduler) worker(hs *hostScheduler, poolKey string, useTLS bool) {
 		case <-s.stopCh:
 			return
 		case work := <-hs.queue:
-			// Check if caller already gave up.
 			select {
 			case <-work.ctx.Done():
 				work.resp <- scheduledResult{err: WrapError(ErrorTypeTimeout, "scheduler: cancelled before execute", work.ctx.Err())}

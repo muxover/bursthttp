@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-05-03
+
+### Added
+- **Connection inspector (`Client.ConnectionPool`)**: returns a `[]ConnectionInfo` snapshot of every live connection — ID, host, port, healthy flag, active request count, health score, latency EWMA, pipeline depth, and per-connection byte counters (`BytesRead`, `BytesWritten`). Useful for debugging pool saturation and latency outliers.
+- **Token-bucket rate limiter (`RequestsPerSecond`, `BurstSize`)**: when both config fields are > 0, `DoWithContext` blocks until a token is available before sending. 429s already handled by adaptive retry; this controls outgoing RPS at the client level. Context cancellation unblocks waiting callers immediately.
+- New types: `ConnectionInfo`.
+- New config fields: `RequestsPerSecond float64`, `BurstSize int`.
+
+### Changed
+- `Connection` now tracks `bytesRead` and `bytesWritten` atomically, incremented on each completed request in both sequential and pipelined paths.
+
 ## [0.1.5] - 2026-04-24
 
 ### Added
@@ -113,7 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmarks for client operations and internal components.
 - Godoc examples for all major APIs.
 
-[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/muxover/bursthttp/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/muxover/bursthttp/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/muxover/bursthttp/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/muxover/bursthttp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/muxover/bursthttp/compare/v0.1.2...v0.1.3

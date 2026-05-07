@@ -82,7 +82,7 @@ func main() {
 	defer client.ReleaseRequest(req)
 	req.Method = "GET"
 	req.Path = "/get"
-	req.SetHeader("User-Agent", "bursthttp/0.1.0")
+	req.SetHeader("User-Agent", "bursthttp/"+bursthttp.GetVersion())
 
 	for i := 1; i <= 3; i++ {
 		resp, err := client.Do(req)

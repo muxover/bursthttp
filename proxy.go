@@ -18,7 +18,6 @@ type ProxyDialer struct {
 	enableLogging  bool // Cached from config for performance
 }
 
-// NewProxyDialer creates a new proxy dialer from configuration.
 func NewProxyDialer(config *Config) (*ProxyDialer, error) {
 	u, err := url.Parse(config.ProxyURL)
 	if err != nil {
@@ -70,7 +69,6 @@ func (p *ProxyDialer) DialForward() (net.Conn, error) {
 	return conn, nil
 }
 
-// Dial establishes a connection through the proxy using HTTP CONNECT.
 // Each CONNECT tunnel is bound to a single target; the main pool handles reuse.
 func (p *ProxyDialer) Dial(host string, port int) (net.Conn, error) {
 	target := p.buildTarget(host, port)
@@ -123,7 +121,6 @@ func (p *ProxyDialer) buildTarget(host string, port int) string {
 	return host + ":" + string(portBuf[start:])
 }
 
-// writeConnect sends an HTTP CONNECT request to the proxy using a stack buffer.
 func (p *ProxyDialer) writeConnect(conn net.Conn, target string) error {
 	targetLen := len(target)
 	authLen := len(p.authHeader)
@@ -168,7 +165,6 @@ func (p *ProxyDialer) writeConnect(conn net.Conn, target string) error {
 	return nil
 }
 
-// readConnectResponse reads and validates the proxy CONNECT response.
 func (p *ProxyDialer) readConnectResponse(conn net.Conn) error {
 	deadline := time.Now().Add(p.readTimeout)
 	if err := conn.SetReadDeadline(deadline); err != nil {

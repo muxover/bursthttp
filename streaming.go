@@ -18,7 +18,6 @@ type StreamingResponse struct {
 	once      sync.Once
 }
 
-// Header returns the first value for the given header key (case-insensitive).
 func (sr *StreamingResponse) Header(key string) string {
 	for _, h := range sr.Headers {
 		if strEqualFoldASCII(h.Key, key) {
@@ -28,7 +27,6 @@ func (sr *StreamingResponse) Header(key string) string {
 	return ""
 }
 
-// HasHeader reports whether the streaming response contains the named header.
 func (sr *StreamingResponse) HasHeader(key string) bool {
 	for _, h := range sr.Headers {
 		if strEqualFoldASCII(h.Key, key) {

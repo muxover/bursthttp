@@ -31,7 +31,6 @@ type MetricsCollector interface {
 	Snapshot() MetricsSnapshot
 }
 
-// PoolEvent represents a connection pool lifecycle event.
 type PoolEvent int
 
 const (
@@ -96,7 +95,6 @@ type BuiltinMetrics struct {
 	maxSamples int
 }
 
-// NewBuiltinMetrics creates a ready-to-use BuiltinMetrics instance.
 func NewBuiltinMetrics() *BuiltinMetrics {
 	return &BuiltinMetrics{
 		latencies:  make([]time.Duration, 0, 1024),
@@ -104,12 +102,10 @@ func NewBuiltinMetrics() *BuiltinMetrics {
 	}
 }
 
-// RecordRequest implements MetricsCollector.
 func (m *BuiltinMetrics) RecordRequest(method, host string) time.Time {
 	return time.Now()
 }
 
-// RecordResponse implements MetricsCollector.
 func (m *BuiltinMetrics) RecordResponse(method, host string, statusCode int, err error, start time.Time, bytesWritten, bytesRead int64) {
 	m.requestsTotal.Add(1)
 	m.bytesWritten.Add(bytesWritten)
@@ -142,7 +138,6 @@ func (m *BuiltinMetrics) RecordResponse(method, host string, statusCode int, err
 	}
 }
 
-// RecordPoolEvent implements MetricsCollector.
 func (m *BuiltinMetrics) RecordPoolEvent(event PoolEvent, host string) {
 	switch event {
 	case PoolEventConnCreated:
@@ -156,12 +151,10 @@ func (m *BuiltinMetrics) RecordPoolEvent(event PoolEvent, host string) {
 	}
 }
 
-// RecordRetry increments the retry counter. Called by the retry loop.
 func (m *BuiltinMetrics) RecordRetry() {
 	m.retriesTotal.Add(1)
 }
 
-// Snapshot implements MetricsCollector.
 func (m *BuiltinMetrics) Snapshot() MetricsSnapshot {
 	snap := MetricsSnapshot{
 		RequestsTotal: m.requestsTotal.Load(),

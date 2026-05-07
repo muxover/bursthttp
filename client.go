@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// GetVersion returns the library version.
 func GetVersion() string {
 	return Version
 }
@@ -31,9 +30,9 @@ type Client struct {
 	responsePool  *sync.Pool
 	enableLogging bool
 	scheduler     *Scheduler
+	limiter       *tokenBucket
 }
 
-// NewClient creates a new HTTP client with the given configuration.
 // Pass nil to use DefaultConfig.
 func NewClient(config *Config) (*Client, error) {
 	if config == nil {
@@ -112,6 +111,9 @@ func NewClient(config *Config) (*Client, error) {
 	}
 	if config.EnableScheduler {
 		c.scheduler = NewScheduler(c, config.SchedulerWorkers, config.SchedulerQueueDepth)
+	}
+	if config.RequestsPerSecond > 0 && config.BurstSize > 0 {
+		c.limiter = newTokenBucket(config.RequestsPerSecond, config.BurstSize)
 	}
 	return c, nil
 }
@@ -204,6 +206,12 @@ func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, er
 		case <-ctxDone:
 			return nil, WrapError(ErrorTypeTimeout, "request cancelled before send", req.ctx.Err())
 		default:
+		}
+	}
+
+	if c.limiter != nil {
+		if err := c.limiter.Wait(ctx); err != nil {
+			return nil, WrapError(ErrorTypeTimeout, "rate limit wait cancelled", err)
 		}
 	}
 
@@ -376,7 +384,6 @@ func (c *Client) DoReader(ctx context.Context, method, urlOrPath string, bodyRea
 	return c.DoWithContext(ctx, req)
 }
 
-// Get performs a GET request to path using the configured host.
 func (c *Client) Get(path string, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -388,7 +395,6 @@ func (c *Client) Get(path string, headers []Header) (*Response, error) {
 	return c.Do(req)
 }
 
-// GetURL performs a GET request to a full URL.
 func (c *Client) GetURL(rawURL string, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -400,7 +406,6 @@ func (c *Client) GetURL(rawURL string, headers []Header) (*Response, error) {
 	return c.Do(req)
 }
 
-// Post performs a POST request to path with the given body.
 func (c *Client) Post(path string, body []byte, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -413,7 +418,6 @@ func (c *Client) Post(path string, body []byte, headers []Header) (*Response, er
 	return c.Do(req)
 }
 
-// PostURL performs a POST request to a full URL.
 func (c *Client) PostURL(rawURL string, body []byte, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -426,7 +430,6 @@ func (c *Client) PostURL(rawURL string, body []byte, headers []Header) (*Respons
 	return c.Do(req)
 }
 
-// Put performs a PUT request to path.
 func (c *Client) Put(path string, body []byte, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -439,7 +442,6 @@ func (c *Client) Put(path string, body []byte, headers []Header) (*Response, err
 	return c.Do(req)
 }
 
-// Patch performs a PATCH request to path.
 func (c *Client) Patch(path string, body []byte, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -452,7 +454,6 @@ func (c *Client) Patch(path string, body []byte, headers []Header) (*Response, e
 	return c.Do(req)
 }
 
-// Delete performs a DELETE request to path.
 func (c *Client) Delete(path string, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -464,7 +465,6 @@ func (c *Client) Delete(path string, headers []Header) (*Response, error) {
 	return c.Do(req)
 }
 
-// Head performs a HEAD request to path.
 func (c *Client) Head(path string, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -476,7 +476,6 @@ func (c *Client) Head(path string, headers []Header) (*Response, error) {
 	return c.Do(req)
 }
 
-// Options performs an OPTIONS request to path.
 func (c *Client) Options(path string, headers []Header) (*Response, error) {
 	req := c.acquireRequest()
 	defer c.releaseRequest(req)
@@ -488,17 +487,14 @@ func (c *Client) Options(path string, headers []Header) (*Response, error) {
 	return c.Do(req)
 }
 
-// AcquireRequest gets a Request from the client's pool.
 func (c *Client) AcquireRequest() *Request {
 	return c.acquireRequest()
 }
 
-// ReleaseRequest returns a Request to the client's pool.
 func (c *Client) ReleaseRequest(req *Request) {
 	c.releaseRequest(req)
 }
 
-// ReleaseResponse returns a Response to the client's pool.
 // Always call this after processing a response to avoid memory leaks.
 func (c *Client) ReleaseResponse(resp *Response) {
 	c.releaseResponse(resp)
@@ -554,12 +550,10 @@ func (c *Client) releaseResponse(resp *Response) {
 	c.responsePool.Put(resp)
 }
 
-// GetHealthyConnections returns the total number of healthy pooled connections.
 func (c *Client) GetHealthyConnections() int {
 	return c.pool.GetHealthyConnections()
 }
 
-// Stats returns a snapshot of pool and metrics state.
 func (c *Client) Stats() ClientStats {
 	stats := ClientStats{
 		HealthyConnections: c.pool.GetHealthyConnections(),

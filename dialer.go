@@ -14,7 +14,6 @@ type Dialer struct {
 	dnsCache     *DNSCache
 }
 
-// NewDialer creates a new Dialer from configuration.
 func NewDialer(config *Config) (*Dialer, error) {
 	d := &Dialer{config: config}
 	if config.SOCKS5Addr != "" {
@@ -94,7 +93,6 @@ func (d *Dialer) Stop() {
 	}
 }
 
-// Dial establishes a connection to the given address ("host:port").
 // Falls back to config Host/Port when address is empty.
 func (d *Dialer) Dial() (net.Conn, error) {
 	return d.DialAddr("", 0)

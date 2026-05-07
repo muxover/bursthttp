@@ -18,6 +18,16 @@ func main() {
 	retryAndMetrics()
 	fmt.Println()
 	streamingAndMultipart()
+	fmt.Println()
+	batchRequests()
+	fmt.Println()
+	preEncodedHeaders()
+	fmt.Println()
+	gzipCompression()
+	fmt.Println()
+	connectionInspector()
+	fmt.Println()
+	rateLimiter()
 }
 
 // highThroughput demonstrates pipelining with connection warm-up.
@@ -107,6 +117,199 @@ func retryAndMetrics() {
 	// 429 would trigger retry automatically — here we show a normal request.
 	snap := m.Snapshot()
 	fmt.Printf("  Total requests: %d, Retries: %d\n", snap.RequestsTotal, snap.RetriesTotal)
+}
+
+// batchRequests demonstrates Client.Batch — concurrent fan-out with ordered results.
+func batchRequests() {
+	fmt.Println("═══ Batch API (fan-out 5 concurrent requests) ═══")
+
+	cfg := bursthttp.DefaultConfig()
+	cfg.Host = "httpbin.org"
+	cfg.Port = 443
+	cfg.UseTLS = true
+
+	client, err := bursthttp.NewClient(cfg)
+	if err != nil {
+		fmt.Printf("Failed: %v\n", err)
+		return
+	}
+	defer client.Stop()
+
+	results := client.BatchWithContext(context.Background(), func(b *bursthttp.Batch) {
+		b.Get("/get", nil)
+		b.Get("/ip", nil)
+		b.Get("/user-agent", nil)
+		b.Post("/post", []byte(`{"batch":true}`), []bursthttp.Header{{Key: "Content-Type", Value: "application/json"}})
+		b.Get("/headers", nil)
+	})
+
+	for _, r := range results {
+		if r.Err != nil {
+			fmt.Printf("  [%d] error: %v\n", r.Index, r.Err)
+			continue
+		}
+		fmt.Printf("  [%d] status=%d bytes=%d\n", r.Index, r.Response.StatusCode, len(r.Response.Body))
+		client.ReleaseResponse(r.Response)
+	}
+}
+
+// preEncodedHeaders demonstrates BuildPreEncodedHeaderPrefix — encode headers once,
+// reuse across many requests without re-encoding on every send.
+func preEncodedHeaders() {
+	fmt.Println("═══ Pre-Encoded Headers (zero-alloc hot path) ═══")
+
+	cfg := bursthttp.DefaultConfig()
+	cfg.Host = "httpbin.org"
+	cfg.Port = 443
+	cfg.UseTLS = true
+
+	client, err := bursthttp.NewClient(cfg)
+	if err != nil {
+		fmt.Printf("Failed: %v\n", err)
+		return
+	}
+	defer client.Stop()
+
+	// Build a template request with fixed headers.
+	tmpl := client.AcquireRequest()
+	tmpl.Method = "GET"
+	tmpl.Path = "/get"
+	tmpl.SetHeader("User-Agent", "bursthttp/"+bursthttp.GetVersion())
+	tmpl.SetHeader("Accept", "application/json")
+	tmpl.SetHeader("X-Service", "example")
+	defer client.ReleaseRequest(tmpl)
+
+	prefix, err := client.BuildPreEncodedHeaderPrefix(tmpl, "httpbin.org", 443, true)
+	if err != nil {
+		fmt.Printf("BuildPreEncodedHeaderPrefix: %v\n", err)
+		return
+	}
+	fmt.Printf("  Header prefix encoded once: %d bytes\n", len(prefix))
+
+	// Subsequent requests skip all header encoding — only body changes between sends.
+	for i := 1; i <= 3; i++ {
+		req := client.AcquireRequest()
+		req.Method = "GET"
+		req.Path = "/get"
+		req.PreEncodedHeaderPrefix = prefix
+
+		resp, err := client.Do(req)
+		client.ReleaseRequest(req)
+		if err != nil {
+			fmt.Printf("  req %d: error: %v\n", i, err)
+			continue
+		}
+		fmt.Printf("  req %d: status=%d\n", i, resp.StatusCode)
+		client.ReleaseResponse(resp)
+	}
+}
+
+// gzipCompression demonstrates EnableCompression (request body gzip) and
+// transparent response decompression when the server returns Content-Encoding: gzip.
+func gzipCompression() {
+	fmt.Println("═══ Gzip Compression ═══")
+
+	cfg := bursthttp.DefaultConfig()
+	cfg.Host = "httpbin.org"
+	cfg.Port = 443
+	cfg.UseTLS = true
+	cfg.EnableCompression = true // gzip-encode outgoing request bodies; response decompression is automatic
+
+	client, err := bursthttp.NewClient(cfg)
+	if err != nil {
+		fmt.Printf("Failed: %v\n", err)
+		return
+	}
+	defer client.Stop()
+
+	payload := []byte(`{"data":"` + strings.Repeat("bursthttp ", 50) + `"}`)
+	resp, err := client.Post("/post", payload, []bursthttp.Header{
+		{Key: "Content-Type", Value: "application/json"},
+		{Key: "Accept-Encoding", Value: "gzip"},
+	})
+	if err != nil {
+		fmt.Printf("  Error: %v\n", err)
+		return
+	}
+	defer client.ReleaseResponse(resp)
+	fmt.Printf("  Status: %d, original payload: %d bytes, response: %d bytes\n",
+		resp.StatusCode, len(payload), len(resp.Body))
+}
+
+// connectionInspector demonstrates Client.ConnectionPool() — a live snapshot of
+// every pooled connection with health score, latency EWMA, and byte counters.
+func connectionInspector() {
+	fmt.Println("═══ Connection Inspector ═══")
+
+	cfg := bursthttp.DefaultConfig()
+	cfg.Host = "httpbin.org"
+	cfg.Port = 443
+	cfg.UseTLS = true
+	cfg.EnableHealthScoring = true
+
+	client, err := bursthttp.NewClient(cfg)
+	if err != nil {
+		fmt.Printf("Failed: %v\n", err)
+		return
+	}
+	defer client.Stop()
+
+	if err := client.StartN(4); err != nil {
+		fmt.Printf("Warm-up: %v\n", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := client.Get("/get", nil)
+			if err == nil {
+				client.ReleaseResponse(resp)
+			}
+		}()
+	}
+	wg.Wait()
+
+	conns := client.ConnectionPool()
+	fmt.Printf("  Live connections: %d\n", len(conns))
+	for _, c := range conns {
+		fmt.Printf("  [conn %d] %s:%d healthy=%v score=%d latency=%s active=%d bytes_r=%d bytes_w=%d\n",
+			c.ID, c.Host, c.Port, c.Healthy, c.HealthScore,
+			c.LatencyEWMA.Round(time.Millisecond),
+			c.ActiveReqs, c.BytesRead, c.BytesWritten)
+	}
+}
+
+// rateLimiter demonstrates RequestsPerSecond + BurstSize token-bucket throttling.
+func rateLimiter() {
+	fmt.Println("═══ Rate Limiter (10 RPS, burst 3) ═══")
+
+	cfg := bursthttp.DefaultConfig()
+	cfg.Host = "httpbin.org"
+	cfg.Port = 443
+	cfg.UseTLS = true
+	cfg.RequestsPerSecond = 10
+	cfg.BurstSize = 3
+
+	client, err := bursthttp.NewClient(cfg)
+	if err != nil {
+		fmt.Printf("Failed: %v\n", err)
+		return
+	}
+	defer client.Stop()
+
+	start := time.Now()
+	for i := 0; i < 6; i++ {
+		resp, err := client.Get("/get", nil)
+		if err != nil {
+			fmt.Printf("  req %d: error: %v\n", i+1, err)
+			continue
+		}
+		fmt.Printf("  req %d: status=%d elapsed=%s\n", i+1, resp.StatusCode, time.Since(start).Round(time.Millisecond))
+		client.ReleaseResponse(resp)
+	}
+	fmt.Printf("  Total: %s for 6 requests at 10 RPS\n", time.Since(start).Round(time.Millisecond))
 }
 
 // streamingAndMultipart demonstrates streaming responses and multipart uploads.

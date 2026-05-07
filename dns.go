@@ -197,14 +197,12 @@ func (c *DNSCache) Refresh(host string) ([]string, error) {
 	return addrs, nil
 }
 
-// Invalidate removes a host from the cache.
 func (c *DNSCache) Invalidate(host string) {
 	c.mu.Lock()
 	delete(c.entries, host)
 	c.mu.Unlock()
 }
 
-// Clear removes all cached entries.
 func (c *DNSCache) Clear() {
 	c.mu.Lock()
 	c.entries = make(map[string]*dnsEntry)

@@ -12,7 +12,6 @@ type Compressor struct {
 	pool  sync.Pool
 }
 
-// NewCompressor creates a new compressor with the specified compression level.
 func NewCompressor(level int) *Compressor {
 	if level < 1 || level > 9 {
 		level = 6
@@ -36,7 +35,6 @@ func NewCompressor(level int) *Compressor {
 	return c
 }
 
-// CompressInto compresses data into the provided buffer.
 func (c *Compressor) CompressInto(dst []byte, src []byte) ([]byte, error) {
 	if len(src) == 0 {
 		return src, nil

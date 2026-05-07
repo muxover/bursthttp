@@ -21,7 +21,6 @@ type Response struct {
 	rawHeaderBuf []byte // Copy of raw header block for zero-copy HeaderBytes(); valid until ReleaseResponse
 }
 
-// AcquireResponse gets a response from the pool.
 func AcquireResponse() *Response {
 	resp := responsePool.Get().(*Response)
 	resp.Reset()
@@ -34,12 +33,10 @@ func AcquireResponseWithMaxSize(maxSize int) *Response {
 	resp := AcquireResponse()
 	if maxSize > 0 {
 		resp.maxSize = maxSize
-		// Ensure buffer is large enough but not larger than maxSize
 		if len(resp.bodyBuf) < initialResponseBufferSize {
 			resp.bodyBuf = make([]byte, initialResponseBufferSize)
 		}
 		if len(resp.bodyBuf) > maxSize {
-			// Shrink if buffer is too large (but keep minimum initial size)
 			if maxSize >= initialResponseBufferSize {
 				resp.bodyBuf = make([]byte, maxSize)
 			}
@@ -48,8 +45,6 @@ func AcquireResponseWithMaxSize(maxSize int) *Response {
 	return resp
 }
 
-// ensureBufferSize ensures the buffer is at least the required size.
-// Optimized for high RPS - minimizes allocations and rounding overhead.
 func (r *Response) ensureBufferSize(required int) bool {
 	if required <= len(r.bodyBuf) {
 		return true
@@ -81,7 +76,6 @@ func (r *Response) ensureBufferSize(required int) bool {
 	return true
 }
 
-// ReleaseResponse returns a response to the pool.
 func ReleaseResponse(resp *Response) {
 	if resp == nil {
 		return
@@ -95,7 +89,6 @@ func ReleaseResponse(resp *Response) {
 	responsePool.Put(resp)
 }
 
-// Reset clears the response for reuse.
 func (r *Response) Reset() {
 	r.StatusCode = 0
 	r.ContentLength = 0
@@ -176,7 +169,6 @@ func strEqualFoldASCII(a, b string) bool {
 	return true
 }
 
-// responsePool is a sync.Pool for response objects.
 var responsePool = sync.Pool{
 	New: func() interface{} {
 		return &Response{

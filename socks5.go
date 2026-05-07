@@ -14,7 +14,6 @@ var (
 	errSOCKS5Unsupported = errors.New("SOCKS5 unsupported address type")
 )
 
-// SOCKS5Dialer handles connections through a SOCKS5 proxy.
 type SOCKS5Dialer struct {
 	proxyAddr     string
 	username      string
@@ -23,7 +22,6 @@ type SOCKS5Dialer struct {
 	enableLogging bool
 }
 
-// NewSOCKS5Dialer creates a SOCKS5 dialer from configuration.
 func NewSOCKS5Dialer(config *Config) (*SOCKS5Dialer, error) {
 	if config.SOCKS5Addr == "" {
 		return nil, WrapError(ErrorTypeProxy, "SOCKS5 address is empty", ErrProxyFailed)
@@ -41,7 +39,6 @@ func NewSOCKS5Dialer(config *Config) (*SOCKS5Dialer, error) {
 	}, nil
 }
 
-// Dial connects to the target host:port through the SOCKS5 proxy.
 func (d *SOCKS5Dialer) Dial(host string, port int) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", d.proxyAddr, d.timeout)
 	if err != nil {

@@ -72,6 +72,9 @@ type Connection struct {
 	healthScore   atomic.Int32 // 0–100; higher is better
 	pipelineDepth atomic.Int32 // dynamic pipeline depth (auto-tuned when EnablePipelineAutoTune)
 
+	bytesRead    atomic.Int64
+	bytesWritten atomic.Int64
+
 	// Connection establishment — serializes concurrent reconnection attempts.
 	connectMu sync.Mutex
 
@@ -106,7 +109,7 @@ type ResponseReader struct {
 	stopChan chan struct{}
 }
 
-// NewConnection creates a Connection. TCP is not established until first use.
+// TCP is not established until first use.
 func NewConnection(id int, host string, port int, config *Config, dialer *Dialer, tlsConfig *TLSConfig, compressor *Compressor) *Connection {
 	now := time.Now().UnixNano()
 
@@ -237,12 +240,10 @@ func (c *Connection) putWriteBuf(buf []byte) {
 	connectionWriteBufPool.Put(buf)
 }
 
-// IsHealthy returns true if the connection is alive and not stopped.
 func (c *Connection) IsHealthy() bool {
 	return c.healthy.Load() == 1 && c.stopped.Load() == 0
 }
 
-// CanAcceptRequest returns true when the connection can take another request.
 func (c *Connection) CanAcceptRequest() bool {
 	if !c.IsHealthy() {
 		return false
@@ -257,7 +258,6 @@ func (c *Connection) CanAcceptRequest() bool {
 	return c.activeReqs.Load() == 0
 }
 
-// recordSuccess updates the EWMA latency and health score after a successful request.
 func (c *Connection) recordSuccess(elapsed time.Duration) {
 	if !c.config.EnableHealthScoring {
 		return
@@ -366,7 +366,6 @@ func (c *Connection) HealthScore() int32 {
 	return s
 }
 
-// Do executes a request on this connection.
 func (c *Connection) Do(req *Request) (*Response, error) {
 	if req == nil {
 		return nil, WrapError(ErrorTypeValidation, "request is nil", ErrInvalidResponse)
@@ -485,6 +484,8 @@ func (c *Connection) doSequential(req *Request) (*Response, error) {
 	c.reqsOnConn.Add(1)
 	c.updateTimeCache()
 	c.recordSuccess(time.Since(reqStart))
+	c.bytesWritten.Add(int64(len(body)))
+	c.bytesRead.Add(int64(resp.ContentLength))
 
 	if resp.isConnectionClose() {
 		c.healthy.Store(0)
@@ -552,7 +553,6 @@ func (c *Connection) doPipelined(req *Request) (*Response, error) {
 		err:      make(chan error, 1),
 	}
 
-	//
 	// This is the key invariant: every entry in pendingReqs has already been
 	// written to the wire. The response reader can safely read responses in
 	// pendingReqs order without worrying about requests not yet sent.
@@ -578,6 +578,7 @@ func (c *Connection) doPipelined(req *Request) (*Response, error) {
 
 	// Only add to pending AFTER successful write.
 	pending.sentAt = time.Now().UnixNano()
+	c.bytesWritten.Add(int64(len(body)))
 	c.pendingReqs = append(c.pendingReqs, pending)
 	c.pendingMu.Unlock()
 
@@ -1089,6 +1090,7 @@ func (rr *ResponseReader) run() {
 				if pending.sentAt > 0 {
 					rr.conn.recordSuccess(time.Duration(time.Now().UnixNano() - pending.sentAt))
 				}
+				rr.conn.bytesRead.Add(int64(resp.ContentLength))
 
 				connClose := resp.isConnectionClose()
 
