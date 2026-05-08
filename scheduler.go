@@ -12,6 +12,7 @@ type scheduledWork struct {
 	poolKey string
 	useTLS  bool
 	resp    chan scheduledResult
+	state   atomic.Int32 // 0=enqueued, 1=worker claimed, 2=caller cancelled before claim
 }
 
 type scheduledResult struct {
@@ -20,7 +21,7 @@ type scheduledResult struct {
 }
 
 type hostScheduler struct {
-	queue   chan scheduledWork
+	queue   chan *scheduledWork
 	stopCh  chan struct{}
 	stopped atomic.Bool
 	wg      sync.WaitGroup
@@ -56,7 +57,7 @@ func NewScheduler(client *Client, workers, queueCap int) *Scheduler {
 func (s *Scheduler) Do(ctx context.Context, req *Request, poolKey string, useTLS bool) (*Response, error) {
 	hs := s.getOrCreateHostScheduler(poolKey, useTLS)
 
-	work := scheduledWork{
+	work := &scheduledWork{
 		ctx:     ctx,
 		req:     req,
 		poolKey: poolKey,
@@ -72,10 +73,25 @@ func (s *Scheduler) Do(ctx context.Context, req *Request, poolKey string, useTLS
 		return nil, WrapError(ErrorTypeNetwork, "scheduler: stopped", ErrConnectFailed)
 	}
 
-	// no ctx escape: caller must wait so req/resp aren't released while the worker holds them
 	select {
 	case result := <-work.resp:
 		return result.resp, result.err
+	case <-ctx.Done():
+		if work.state.CompareAndSwap(0, 2) {
+			// Worker hasn't claimed req yet; it will skip this item when dequeued.
+			return nil, WrapError(ErrorTypeTimeout, "scheduler: wait cancelled", ctx.Err())
+		}
+		// Worker already claimed req; block until it's done to prevent use-after-free.
+		result := <-work.resp
+		resp := result.resp
+		if resp == nil {
+			resp = work.req.resp
+		}
+		if resp != nil {
+			s.client.releaseResponse(resp)
+		}
+		// signal DoWithContext not to double-free resp
+		return nil, errRespTransferred
 	case <-s.stopCh:
 		return nil, WrapError(ErrorTypeNetwork, "scheduler: stopped", ErrConnectFailed)
 	}
@@ -100,7 +116,7 @@ func (s *Scheduler) getOrCreateHostScheduler(poolKey string, useTLS bool) *hostS
 		return v.(*hostScheduler)
 	}
 	hs := &hostScheduler{
-		queue:  make(chan scheduledWork, s.queueCap),
+		queue:  make(chan *scheduledWork, s.queueCap),
 		stopCh: make(chan struct{}),
 	}
 	if actual, loaded := s.hosts.LoadOrStore(poolKey, hs); loaded {
@@ -122,6 +138,10 @@ func (s *Scheduler) worker(hs *hostScheduler, poolKey string, useTLS bool) {
 		case <-s.stopCh:
 			return
 		case work := <-hs.queue:
+			if !work.state.CompareAndSwap(0, 1) {
+				// Caller cancelled before we claimed it; skip without touching req.
+				continue
+			}
 			select {
 			case <-work.ctx.Done():
 				work.resp <- scheduledResult{err: WrapError(ErrorTypeTimeout, "scheduler: cancelled before execute", work.ctx.Err())}
