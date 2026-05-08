@@ -83,12 +83,11 @@ func (s *Scheduler) Do(ctx context.Context, req *Request, poolKey string, useTLS
 		return nil, WrapError(ErrorTypeNetwork, "scheduler: stopped", ErrConnectFailed)
 	}
 
-	// Wait for result.
+	// Wait for result — no ctx escape here; caller must wait so req/resp are not
+	// released while the worker still holds them. ReadTimeout bounds the wait.
 	select {
 	case result := <-work.resp:
 		return result.resp, result.err
-	case <-ctx.Done():
-		return nil, WrapError(ErrorTypeTimeout, "scheduler: wait cancelled", ctx.Err())
 	case <-s.stopCh:
 		return nil, WrapError(ErrorTypeNetwork, "scheduler: stopped", ErrConnectFailed)
 	}
