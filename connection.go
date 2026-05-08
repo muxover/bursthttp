@@ -58,6 +58,7 @@ type Connection struct {
 	reqsOnConn  atomic.Int32
 	lastUsed    atomic.Int64
 	activeReqs  atomic.Int32
+	poolClaimed atomic.Bool // set by pool when it pre-increments activeReqs to prevent TOCTOU double-claim
 
 	latencyEWMA   atomic.Int64 // nanoseconds, EWMA α=1/8
 	errorCount    atomic.Int32 // recent error count (reset every healthWindowSize requests)
@@ -356,7 +357,9 @@ func (c *Connection) Do(req *Request) (*Response, error) {
 }
 
 func (c *Connection) doSequential(req *Request) (*Response, error) {
-	c.activeReqs.Add(1)
+	if !c.poolClaimed.Swap(false) {
+		c.activeReqs.Add(1)
+	}
 	defer c.activeReqs.Add(-1)
 	reqStart := time.Now()
 

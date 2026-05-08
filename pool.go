@@ -418,6 +418,13 @@ func (hp *HostPool) getIdleConnection() *Connection {
 		}
 
 		if best != nil {
+			if !best.config.EnablePipelining {
+				// Atomically claim to close the TOCTOU gap between CanAcceptRequest and activeReqs.Add(1) in doSequential.
+				if !best.activeReqs.CompareAndSwap(0, 1) {
+					continue // another goroutine claimed it between our check and now; rescan
+				}
+				best.poolClaimed.Store(true)
+			}
 			hp.index.Store((bestIdx + 1) % connCount)
 			return best
 		}
@@ -432,6 +439,12 @@ func (hp *HostPool) getIdleConnection() *Connection {
 					continue
 				}
 				if c.CanAcceptRequest() {
+					if !c.config.EnablePipelining {
+						if !c.activeReqs.CompareAndSwap(0, 1) {
+							continue
+						}
+						c.poolClaimed.Store(true)
+					}
 					hp.index.Store((idx + 1) % connCount)
 					if len(unhealthy) > 0 {
 						hp.removeUnhealthyConnections(unhealthy)
