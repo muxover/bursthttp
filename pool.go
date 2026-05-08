@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-// Pool manages per-host connection pools. Host pool lookup and connection list
-// access are lock-free (sync.Map + atomic.Pointer for the connection slice).
 type Pool struct {
 	hostPools  sync.Map // map[string]*HostPool
 	config     *Config
@@ -24,8 +22,6 @@ type Pool struct {
 	wg         sync.WaitGroup
 }
 
-// HostPool manages connections for a single scheme+host+port key.
-// connections is updated with atomic.Pointer for lock-free get path.
 type HostPool struct {
 	connections atomic.Pointer[[]*Connection]
 	index       atomic.Uint32
@@ -80,8 +76,6 @@ func (p *Pool) Stop() {
 	}
 }
 
-// GracefulStop waits for in-flight requests to complete (up to timeout) before
-// closing all connections. Returns true if all requests drained cleanly.
 func (p *Pool) GracefulStop(timeout time.Duration) bool {
 	p.stopOnce.Do(func() {
 		close(p.stopCh)
@@ -134,8 +128,6 @@ func (p *Pool) activeRequests() int {
 	return total
 }
 
-// WarmUp pre-establishes connections for the primary host.
-// n is the number of connections to create (capped at PoolSize).
 func (p *Pool) WarmUp(key string, useTLS bool, n int) int {
 	if n <= 0 {
 		return 0
@@ -152,8 +144,6 @@ func (p *Pool) WarmUp(key string, useTLS bool, n int) int {
 	return created
 }
 
-// idleEvictor periodically scans host pools and removes connections that have
-// been idle longer than IdleTimeout. Runs until the pool is stopped.
 func (p *Pool) idleEvictor() {
 	defer p.wg.Done()
 	ticker := time.NewTicker(p.config.IdleCheckInterval)
@@ -194,8 +184,6 @@ func (p *Pool) evictIdleConnections() {
 	})
 }
 
-// key is "scheme://host:port" (e.g. "https://api.example.com:443").
-// useTLS controls whether new connections use TLS.
 func (p *Pool) GetConnection(key string, useTLS bool) *Connection {
 	if key == "" {
 		scheme := "http"
@@ -209,15 +197,9 @@ func (p *Pool) GetConnection(key string, useTLS bool) *Connection {
 
 	const maxAttempts = 20
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		// 1. Prefer an idle connection with available pipeline capacity.
 		if conn := hp.getIdleConnection(); conn != nil {
 			return conn
 		}
-		// 2. Try to create a new connection (eagerly connects; returns nil if pool full).
-		// Time the call: if it returns quickly the pool was full (CAS raced); if it
-		// took significant time a real connection attempt was made and failed —
-		// in that case stop retrying immediately to avoid multiplying timeouts
-		// (e.g. a 30s proxy CONNECT timeout × 20 attempts = 600s hang).
 		dialStart := time.Now()
 		if conn := hp.createConnection(); conn != nil {
 			return conn
@@ -226,11 +208,9 @@ func (p *Pool) GetConnection(key string, useTLS bool) *Connection {
 			// A real dial was attempted and failed — don't pile on.
 			return nil
 		}
-		// 3. Fall back to any healthy connection, ignoring pipeline capacity.
 		if conn := hp.getAnyConnection(); conn != nil {
 			return conn
 		}
-		// 4. All connections are mid-dial or pool is saturated — wait briefly.
 		if attempt < maxAttempts-1 {
 			time.Sleep(500 * time.Microsecond)
 		}
@@ -238,8 +218,6 @@ func (p *Pool) GetConnection(key string, useTLS bool) *Connection {
 	return nil
 }
 
-// getHostPool returns (or creates) the HostPool for the given key.
-// key is "scheme://host:port". useTLS determines TLS for newly created pools.
 func (p *Pool) getHostPool(key string, useTLS bool) *HostPool {
 	if v, ok := p.hostPools.Load(key); ok {
 		return v.(*HostPool)
@@ -335,8 +313,7 @@ func parseHostPort(key, defaultHost string, defaultPort int) (string, int) {
 	return host, port
 }
 
-// removeUnhealthyConnections stops and removes a batch of unhealthy connections.
-// Uses CAS to replace the connection slice lock-free.
+// Uses CAS on the connection slice to remove without holding a lock.
 func (hp *HostPool) removeUnhealthyConnections(unhealthy []*Connection) {
 	if len(unhealthy) == 0 {
 		return
@@ -390,8 +367,6 @@ func (hp *HostPool) removeUnhealthyConnections(unhealthy []*Connection) {
 	}
 }
 
-// getIdleConnection returns a healthy, pipeline-ready connection, preferring
-// the one with the highest health score among those scanned.
 func (hp *HostPool) getIdleConnection() *Connection {
 	for {
 		conns := hp.connections.Load()
@@ -430,7 +405,6 @@ func (hp *HostPool) getIdleConnection() *Connection {
 				bestScore = score
 				bestIdx = idx
 			}
-			// Short-circuit: perfect score, no need to scan more.
 			if score == 100 {
 				break
 			}
@@ -448,7 +422,6 @@ func (hp *HostPool) getIdleConnection() *Connection {
 			return best
 		}
 
-		// Scan remainder of pool if initial window found nothing.
 		if maxScan < connCount {
 			unhealthy = unhealthy[:0]
 			for i := maxScan; i < connCount; i++ {
@@ -474,7 +447,6 @@ func (hp *HostPool) getIdleConnection() *Connection {
 	}
 }
 
-// getAnyConnection returns any healthy connection (ignores pipeline capacity).
 func (hp *HostPool) getAnyConnection() *Connection {
 	for {
 		conns := hp.connections.Load()
@@ -525,12 +497,6 @@ func (hp *HostPool) getAnyConnection() *Connection {
 	}
 }
 
-// createConnection allocates a new Connection, establishes the TCP connection
-// eagerly (no lock held during dial), and adds it to the pool.
-//
-// A CAS loop atomically reserves a pool slot before dialing, so the pool
-// never exceeds maxIdle connections and never evicts in-use connections.
-// Returns nil when the pool is at capacity or when the server is unreachable.
 func (hp *HostPool) createConnection() *Connection {
 	limit := int32(hp.maxIdle)
 	for {
@@ -582,7 +548,6 @@ func (p *Pool) eachConnection(fn func(host string, c *Connection)) {
 	})
 }
 
-// GetHealthyConnections returns the total healthy connection count across all pools.
 func (p *Pool) GetHealthyConnections() int {
 	count := 0
 	p.hostPools.Range(func(_, value interface{}) bool {

@@ -13,11 +13,7 @@ func GetVersion() string {
 	return Version
 }
 
-// Client is the main HTTP client. Safe for concurrent use.
-//
-// A single Client is designed for requests to one primary host (configured
-// via Config.Host / Config.Port). For multi-host usage, set Request.URL and
-// the client will route to the correct host pool automatically.
+// Safe for concurrent use. Set Request.URL for multi-host routing.
 type Client struct {
 	config        *Config
 	pool          *Pool
@@ -118,16 +114,10 @@ func NewClient(config *Config) (*Client, error) {
 	return c, nil
 }
 
-// Start pre-establishes connections to the primary host.
-// The number of connections created is min(n, PoolSize) where n defaults to
-// PoolSize/4 when no argument is given. Returns the number of connections
-// established. Calling Start is optional — connections are created lazily on
-// first request when Start is not called.
 func (c *Client) Start() error {
 	return c.StartN(c.config.PoolSize / 4)
 }
 
-// StartN pre-establishes n connections to the primary host.
 func (c *Client) StartN(n int) error {
 	if n <= 0 {
 		n = 1
@@ -147,7 +137,6 @@ func (c *Client) StartN(n int) error {
 	return nil
 }
 
-// Stop closes all pooled connections immediately.
 func (c *Client) Stop() {
 	if c.scheduler != nil {
 		c.scheduler.Stop()
@@ -156,18 +145,10 @@ func (c *Client) Stop() {
 	c.dialer.Stop()
 }
 
-// GracefulStop waits for in-flight requests to complete (up to timeout)
-// before closing all connections. Returns true if all requests drained.
 func (c *Client) GracefulStop(timeout time.Duration) bool {
 	return c.pool.GracefulStop(timeout)
 }
 
-// BuildPreEncodedHeaderPrefix encodes the request line and headers (without
-// Content-Length) for the given host/port/useTLS. The returned slice may be
-// stored on Request.PreEncodedHeaderPrefix to send multiple requests with
-// the same headers without re-encoding. Only the body may change between sends.
-// The request must have Method and Path (or URL) set; host and port should
-// match the target used when sending (e.g. from Config or from URL parsing).
 func (c *Client) BuildPreEncodedHeaderPrefix(req *Request, host string, port int, useTLS bool) ([]byte, error) {
 	if req == nil {
 		return nil, ErrInvalidRequest
@@ -187,13 +168,10 @@ func (c *Client) BuildPreEncodedHeaderPrefix(req *Request, host string, port int
 	return out, nil
 }
 
-// Do executes an HTTP request using context.Background().
 func (c *Client) Do(req *Request) (*Response, error) {
 	return c.DoWithContext(context.Background(), req)
 }
 
-// DoWithContext executes an HTTP request with the given context.
-// If retries are configured, transient failures are retried automatically.
 func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, error) {
 	if req == nil {
 		return nil, WrapError(ErrorTypeValidation, "request is nil", ErrInvalidRequest)
@@ -343,9 +321,6 @@ func (c *Client) DoWithContext(ctx context.Context, req *Request) (*Response, er
 	return nil, WrapError(ErrorTypeInternal, "max retries exhausted", ErrConnectFailed)
 }
 
-// DoStreaming executes a request and returns a StreamingResponse whose Body
-// is an io.ReadCloser. The caller MUST call StreamingResponse.Close() when
-// done to return the underlying response to the pool.
 func (c *Client) DoStreaming(ctx context.Context, req *Request) (*StreamingResponse, error) {
 	resp, err := c.DoWithContext(ctx, req)
 	if err != nil {
@@ -362,8 +337,7 @@ func (c *Client) DoStreaming(ctx context.Context, req *Request) (*StreamingRespo
 	return sr, nil
 }
 
-// DoReader executes a request whose body is read from an io.Reader.
-// contentLength must be the exact number of bytes that bodyReader will produce.
+// contentLength must be the exact number of bytes bodyReader will produce.
 func (c *Client) DoReader(ctx context.Context, method, urlOrPath string, bodyReader io.Reader, contentLength int64, headers []Header) (*Response, error) {
 	body := make([]byte, contentLength)
 	if _, err := io.ReadFull(bodyReader, body); err != nil {
@@ -495,7 +469,6 @@ func (c *Client) ReleaseRequest(req *Request) {
 	c.releaseRequest(req)
 }
 
-// Always call this after processing a response to avoid memory leaks.
 func (c *Client) ReleaseResponse(resp *Response) {
 	c.releaseResponse(resp)
 }
@@ -564,7 +537,6 @@ func (c *Client) Stats() ClientStats {
 	return stats
 }
 
-// ClientStats holds a point-in-time snapshot of client state.
 type ClientStats struct {
 	HealthyConnections int
 	Metrics            MetricsSnapshot

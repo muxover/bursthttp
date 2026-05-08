@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 )
 
-// scheduledWork is a request submitted to a hostScheduler.
 type scheduledWork struct {
 	ctx     context.Context
 	req     *Request
@@ -20,7 +19,6 @@ type scheduledResult struct {
 	err  error
 }
 
-// hostScheduler owns a bounded request queue and a fixed worker pool for one host.
 type hostScheduler struct {
 	queue   chan scheduledWork
 	stopCh  chan struct{}
@@ -28,10 +26,6 @@ type hostScheduler struct {
 	wg      sync.WaitGroup
 }
 
-// Scheduler routes requests through per-host queues processed by a bounded
-// worker pool. This replaces the spin-wait in GetConnection with a proper
-// blocking queue, giving stable latency under overload and eliminating
-// busy-wait CPU overhead when all connections are busy.
 type Scheduler struct {
 	client   *Client
 	hosts    sync.Map // map[string]*hostScheduler
@@ -41,8 +35,6 @@ type Scheduler struct {
 	stopOnce sync.Once
 }
 
-// workers is the number of worker goroutines per host (default: PoolSize).
-// queueCap is the max queued requests per host before Do blocks (default: workers*4).
 func NewScheduler(client *Client, workers, queueCap int) *Scheduler {
 	if workers <= 0 {
 		workers = client.config.PoolSize
@@ -61,8 +53,6 @@ func NewScheduler(client *Client, workers, queueCap int) *Scheduler {
 	}
 }
 
-// Do submits req to the per-host scheduler and blocks until a response or error.
-// poolKey is "scheme://host:port"; useTLS must match the scheme.
 func (s *Scheduler) Do(ctx context.Context, req *Request, poolKey string, useTLS bool) (*Response, error) {
 	hs := s.getOrCreateHostScheduler(poolKey, useTLS)
 
@@ -74,7 +64,6 @@ func (s *Scheduler) Do(ctx context.Context, req *Request, poolKey string, useTLS
 		resp:    make(chan scheduledResult, 1),
 	}
 
-	// Enqueue, respecting context cancellation.
 	select {
 	case hs.queue <- work:
 	case <-ctx.Done():
@@ -83,8 +72,7 @@ func (s *Scheduler) Do(ctx context.Context, req *Request, poolKey string, useTLS
 		return nil, WrapError(ErrorTypeNetwork, "scheduler: stopped", ErrConnectFailed)
 	}
 
-	// Wait for result — no ctx escape here; caller must wait so req/resp are not
-	// released while the worker still holds them. ReadTimeout bounds the wait.
+	// no ctx escape: caller must wait so req/resp aren't released while the worker holds them
 	select {
 	case result := <-work.resp:
 		return result.resp, result.err
@@ -93,7 +81,6 @@ func (s *Scheduler) Do(ctx context.Context, req *Request, poolKey string, useTLS
 	}
 }
 
-// Stop drains the queues and shuts down all worker goroutines.
 func (s *Scheduler) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
@@ -119,7 +106,6 @@ func (s *Scheduler) getOrCreateHostScheduler(poolKey string, useTLS bool) *hostS
 	if actual, loaded := s.hosts.LoadOrStore(poolKey, hs); loaded {
 		return actual.(*hostScheduler)
 	}
-	// Start worker pool.
 	for i := 0; i < s.workers; i++ {
 		hs.wg.Add(1)
 		go s.worker(hs, poolKey, useTLS)

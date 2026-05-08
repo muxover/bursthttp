@@ -5,18 +5,13 @@ import (
 	"sync"
 )
 
-// BatchResult holds the outcome of a single request in a Batch call.
-// Response is non-nil on success; Err is non-nil on failure.
-// The caller must release each non-nil Response via Client.ReleaseResponse.
+// Release each non-nil Response via Client.ReleaseResponse.
 type BatchResult struct {
 	Index    int
 	Response *Response
 	Err      error
 }
 
-// Batch accumulates requests for concurrent fan-out execution.
-// Use it inside the closure passed to Client.Batch or Client.BatchWithContext.
-// All helper methods (Get, Post, etc.) return *Batch for chaining.
 type Batch struct {
 	client  *Client
 	entries []batchEntry
@@ -27,7 +22,6 @@ type batchEntry struct {
 	owned bool // acquired internally; auto-released after execution
 }
 
-// The caller retains ownership of req; do not release it until after the Batch call returns.
 func (b *Batch) Do(req *Request) *Batch {
 	b.entries = append(b.entries, batchEntry{req: req})
 	return b
@@ -114,16 +108,10 @@ func (b *Batch) Delete(path string, headers []Header) *Batch {
 	return b
 }
 
-// Batch executes all requests registered inside fn concurrently and returns
-// their results indexed in the same order they were added.
-// fn is called synchronously to build the request list; execution is concurrent.
-// The caller must release each non-nil BatchResult.Response via Client.ReleaseResponse.
 func (c *Client) Batch(fn func(*Batch)) []BatchResult {
 	return c.BatchWithContext(context.Background(), fn)
 }
 
-// BatchWithContext executes all batch requests concurrently under the given context.
-// Cancelling ctx cancels all in-flight requests in the batch.
 func (c *Client) BatchWithContext(ctx context.Context, fn func(*Batch)) []BatchResult {
 	if fn == nil {
 		return nil

@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-// ProxyDialer handles HTTP CONNECT proxy connections with authentication.
-// Optimized for zero-allocation and minimal syscalls.
 type ProxyDialer struct {
 	proxyAddr      string
 	authHeader     []byte
@@ -55,10 +53,6 @@ func NewProxyDialer(config *Config) (*ProxyDialer, error) {
 	}, nil
 }
 
-// DialForward connects to the proxy over plain TCP without issuing a CONNECT
-// request. Used for HTTP (non-TLS) targets where the proxy acts as a
-// forward proxy: the client sends the absolute-form request directly to the
-// proxy TCP socket and the proxy forwards it to the origin.
 func (p *ProxyDialer) DialForward() (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", p.proxyAddr, p.connectTimeout)
 	if err != nil {

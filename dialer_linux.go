@@ -5,9 +5,7 @@ import (
 )
 
 const (
-	// TCP_FASTOPEN_CONNECT (Linux 4.11+): enables client-side TFO transparently
-	// on connect(). This is the correct option for outgoing connections.
-	// TCP_FASTOPEN (23) is the server-side option for listen queues — not useful here.
+	// 30 = TCP_FASTOPEN_CONNECT (Linux 4.11+); 23 is the server-side listen option, not this
 	tcpFastOpenConnect = 30
 	soReusePort        = 15
 )

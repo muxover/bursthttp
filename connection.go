@@ -26,28 +26,22 @@ var (
 		New: func() interface{} { return make([]byte, initialConnectionWriteBufSize) },
 	}
 
-	// errRespTransferred is a package-internal sentinel returned by doPipelined
-	// when the caller's context fires. It tells DoWithContext that the resp
-	// object's ownership has been transferred to the ResponseReader goroutine,
-	// so DoWithContext must NOT release it.
+	// resp ownership transferred to ResponseReader; DoWithContext must not release it
 	errRespTransferred = errors.New("internal: resp ownership transferred to pipeline reader")
 )
 
-// PendingRequest represents a request queued for a pipelined response.
-// It is added to pendingReqs only AFTER the request has been written to the wire.
 type PendingRequest struct {
-	req       *Request
-	response  chan *Response
-	err       chan error
-	cancelled atomic.Bool // true when caller's context fired
-	// releaseFn is called by the ResponseReader after it finishes processing a
-	// cancelled request's response. This prevents returning resp to the pool
-	// while the ResponseReader still holds a reference to it.
-	releaseFn func(*Response)
-	sentAt    int64 // UnixNano when request was written to wire
+	req         *Request
+	response    chan *Response
+	err         chan error
+	cancelled   atomic.Bool // true when caller's context fired
+	releaseFn   func(*Response)
+	sentAt      int64 // UnixNano when request was written to wire
+	resp        *Response     // snapshotted at enqueue; req may be released before ResponseReader runs
+	readTimeout time.Duration
+	method      string
 }
 
-// Connection owns a single TCP/TLS connection with optional pipelining.
 type Connection struct {
 	id          int
 	host        string // bare hostname
@@ -65,8 +59,7 @@ type Connection struct {
 	lastUsed    atomic.Int64
 	activeReqs  atomic.Int32
 
-	// Health scoring — updated after each request.
-	latencyEWMA   atomic.Int64 // nanoseconds, exponential weighted moving average (α=1/8)
+	latencyEWMA   atomic.Int64 // nanoseconds, EWMA α=1/8
 	errorCount    atomic.Int32 // recent error count (reset every healthWindowSize requests)
 	totalWindow   atomic.Int32 // request count in current health window
 	healthScore   atomic.Int32 // 0–100; higher is better
@@ -75,10 +68,8 @@ type Connection struct {
 	bytesRead    atomic.Int64
 	bytesWritten atomic.Int64
 
-	// Connection establishment — serializes concurrent reconnection attempts.
-	connectMu sync.Mutex
+	connectMu sync.Mutex // serializes reconnection attempts
 
-	// Pipelining — all access serialized by pendingMu.
 	pendingReqs    []*PendingRequest
 	pendingMu      sync.Mutex
 	responseReader *ResponseReader
@@ -86,7 +77,6 @@ type Connection struct {
 	closing        atomic.Int32
 	pendingSignal  chan struct{}
 
-	// Hot-path cached config.
 	readBufSize    int
 	writeBufSize   int
 	maxRespSize    int
@@ -94,14 +84,10 @@ type Connection struct {
 	headerReadSize int
 	bodyReadSize   int
 
-	// Forward-proxy mode: connect to proxy TCP, send absolute-URI requests.
 	isForwardProxy  bool
 	proxyAuthHeader []byte
 }
 
-// ResponseReader is a per-connection goroutine that reads responses in FIFO order.
-// It uses a persistent bufio.Reader to preserve any leftover bytes that arrived
-// in the same TCP segment as a previous response (essential for pipelining).
 type ResponseReader struct {
 	conn     *Connection
 	br       *bufio.Reader // wraps the TCP conn; preserves inter-response leftover
@@ -278,8 +264,6 @@ func (c *Connection) recordSuccess(elapsed time.Duration) {
 	}
 }
 
-// tunePipelineDepth adjusts the dynamic pipeline depth based on EWMA latency.
-// <10ms → grow toward MaxPipelinedRequests cap (32); >100ms → shrink toward 1.
 func (c *Connection) tunePipelineDepth(ewmaNs int64) {
 	ms := ewmaNs / 1e6
 	cur := c.pipelineDepth.Load()
@@ -310,7 +294,6 @@ func (c *Connection) tunePipelineDepth(ewmaNs int64) {
 	c.pipelineDepth.Store(target)
 }
 
-// recordError increments the error count in the health window.
 func (c *Connection) recordError() {
 	if !c.config.EnableHealthScoring {
 		return
@@ -319,22 +302,18 @@ func (c *Connection) recordError() {
 	c.advanceHealthWindow(true)
 }
 
-// advanceHealthWindow ticks the window counter and recomputes health score
-// when the window is full.
 func (c *Connection) advanceHealthWindow(isError bool) {
 	_ = isError
 	total := c.totalWindow.Add(1)
 	if total < healthWindowSize {
 		return
 	}
-	// Window full — recompute score and reset.
 	errors := c.errorCount.Load()
 	c.errorCount.Store(0)
 	c.totalWindow.Store(0)
 
 	score := int32(100)
 
-	// Latency penalty: -1 point per 10ms above 50ms, capped at -60.
 	latMs := c.latencyEWMA.Load() / 1e6
 	if latMs > 50 {
 		penalty := (latMs - 50) / 10
@@ -344,7 +323,6 @@ func (c *Connection) advanceHealthWindow(isError bool) {
 		score -= int32(penalty)
 	}
 
-	// Error rate penalty: up to -40 for 100% error rate.
 	if errors > 0 {
 		errPenalty := int32(40) * errors / int32(healthWindowSize)
 		score -= errPenalty
@@ -356,8 +334,6 @@ func (c *Connection) advanceHealthWindow(isError bool) {
 	c.healthScore.Store(score)
 }
 
-// HealthScore returns the current health score (0–100, higher is better).
-// Returns 100 for new connections with no data yet.
 func (c *Connection) HealthScore() int32 {
 	s := c.healthScore.Load()
 	if s == 0 && c.latencyEWMA.Load() == 0 {
@@ -494,22 +470,11 @@ func (c *Connection) doSequential(req *Request) (*Response, error) {
 	return resp, nil
 }
 
-// doPipelined executes a request using HTTP/1.1 pipelining.
-//
-// Pipeline invariant: responses arrive in the same order as requests on the wire.
-// To uphold this, a request is added to pendingReqs ONLY AFTER it has been
-// successfully written to the wire. The response reader goroutine then reads
-// responses in FIFO order and dispatches them to the correct caller.
-//
-// Cancellation: marking a pending as cancelled does NOT remove it from the
-// queue. The reader still drains that response from the wire (keeping the
-// pipeline in sync), but discards the data instead of delivering it.
 func (c *Connection) doPipelined(req *Request) (*Response, error) {
 	if c.closing.Load() != 0 {
 		return nil, WrapError(ErrorTypeNetwork, "connection is closing", ErrConnectFailed)
 	}
 
-	// Connection rotation (before write).
 	if c.config.MaxRequestsPerConn > 0 && int(c.reqsOnConn.Load()) >= c.config.MaxRequestsPerConn {
 		c.closeConn()
 		if !c.ensureConnection() {
@@ -548,21 +513,20 @@ func (c *Connection) doPipelined(req *Request) (*Response, error) {
 	conn := *connPtr
 
 	pending := &PendingRequest{
-		req:      req,
-		response: make(chan *Response, 1),
-		err:      make(chan error, 1),
+		req:         req,
+		response:    make(chan *Response, 1),
+		err:         make(chan error, 1),
+		resp:        req.resp,
+		readTimeout: c.effectiveReadTimeout(req),
+		method:      req.Method,
 	}
 
-	// This is the key invariant: every entry in pendingReqs has already been
-	// written to the wire. The response reader can safely read responses in
-	// pendingReqs order without worrying about requests not yet sent.
 	c.pendingMu.Lock()
 	if c.closing.Load() != 0 {
 		c.pendingMu.Unlock()
 		return nil, WrapError(ErrorTypeNetwork, "connection is closing", ErrConnectFailed)
 	}
 
-	// Ensure response reader is running.
 	if c.responseReader == nil && c.readerStopped.Load() == 0 {
 		c.startResponseReader()
 	}
@@ -582,13 +546,11 @@ func (c *Connection) doPipelined(req *Request) (*Response, error) {
 	c.pendingReqs = append(c.pendingReqs, pending)
 	c.pendingMu.Unlock()
 
-	// Notify response reader (non-blocking; reader drains the full queue).
 	select {
 	case c.pendingSignal <- struct{}{}:
 	default:
 	}
 
-	// Wait for response.
 	ctxDone := ctxDoneChan(req.ctx)
 	select {
 	case resp := <-pending.response:
@@ -596,16 +558,12 @@ func (c *Connection) doPipelined(req *Request) (*Response, error) {
 	case err := <-pending.err:
 		return nil, err
 	case <-ctxDone:
-		// Transfer resp ownership to the ResponseReader so it can release it
-		// after draining the response from the wire. The caller (DoWithContext)
-		// must NOT touch resp after this point.
 		pending.releaseFn = req.releaseFn
 		pending.cancelled.Store(true)
 		return nil, errRespTransferred
 	}
 }
 
-// prepareBody compresses body if configured and validates size.
 func (c *Connection) prepareBody(req *Request) (body []byte, compressed bool, err error) {
 	body = req.Body
 	if len(body) > c.maxReqSize {
@@ -630,7 +588,6 @@ func (c *Connection) prepareBody(req *Request) (body []byte, compressed bool, er
 	return body, false, nil
 }
 
-// effectiveReadTimeout returns the read timeout for req, capped by any context deadline.
 func (c *Connection) effectiveReadTimeout(req *Request) time.Duration {
 	t := req.ReadTimeout
 	if t == 0 {
@@ -650,7 +607,7 @@ func (c *Connection) effectiveReadTimeout(req *Request) time.Duration {
 	return t
 }
 
-// startResponseReader starts the reader goroutine. Must be called with pendingMu held.
+// Must be called with pendingMu held.
 func (c *Connection) startResponseReader() {
 	if c.readerStopped.Load() != 0 || c.closing.Load() != 0 || c.responseReader != nil {
 		return
@@ -672,7 +629,6 @@ func (c *Connection) startResponseReader() {
 	go c.responseReader.run()
 }
 
-// removePending removes pending from the queue (called with pendingMu held or separately).
 func (c *Connection) removePending(pending *PendingRequest) {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
@@ -684,8 +640,6 @@ func (c *Connection) removePending(pending *PendingRequest) {
 	}
 }
 
-// ensureConnection establishes a TCP/TLS connection if not already connected.
-// connectMu serializes concurrent reconnection attempts (double-checked locking).
 func (c *Connection) ensureConnection() bool {
 	if c.healthy.Load() == 1 {
 		if c.config.IdleTimeout > 0 {
@@ -739,10 +693,7 @@ func (c *Connection) ensureConnection() bool {
 	return true
 }
 
-// connectLocked establishes a TCP (and optionally TLS) connection.
-// A single attempt is made — the pool layer in GetConnection handles retries
-// at a higher level, so retrying here would multiply timeouts unnecessarily
-// (e.g. a 30s proxy CONNECT timeout would become 60s with two attempts).
+// single attempt only — retrying here multiplies proxy CONNECT timeouts
 func (c *Connection) connectLocked() error {
 	if c.dialer == nil {
 		return WrapError(ErrorTypeNetwork, "dialer is nil", ErrConnectFailed)
@@ -772,7 +723,6 @@ func (c *Connection) connectLocked() error {
 	return nil
 }
 
-// closeConn closes the underlying TCP connection and notifies all pending callers.
 func (c *Connection) closeConn() {
 	if !c.closing.CompareAndSwap(0, 1) {
 		return
@@ -798,8 +748,6 @@ func (c *Connection) closeConn() {
 	}
 	c.pendingReqs = c.pendingReqs[:0]
 
-	// Stop the ResponseReader under the same lock that starts it, eliminating
-	// the data race between closeConn and startResponseReader.
 	rr := c.responseReader
 	c.responseReader = nil
 	c.readerStopped.Store(1)
@@ -814,7 +762,6 @@ func (c *Connection) closeConn() {
 	}
 }
 
-// Stop permanently stops the connection.
 func (c *Connection) Stop() {
 	if !c.stopped.CompareAndSwap(0, 1) {
 		return
@@ -822,7 +769,6 @@ func (c *Connection) Stop() {
 	c.closeConn()
 }
 
-// writeRequest serialises and sends the HTTP request to conn.
 func (c *Connection) writeRequest(conn net.Conn, req *Request, body []byte, compressed bool, timeout time.Duration) error {
 	if timeout > 0 {
 		var deadline time.Time
@@ -836,7 +782,6 @@ func (c *Connection) writeRequest(conn net.Conn, req *Request, body []byte, comp
 		}
 	}
 
-	// Pre-encoded path: write prefix + Content-Length line + body (zero-copy for prefix and body).
 	if len(req.PreEncodedHeaderPrefix) > 0 {
 		var clLine [64]byte
 		n := copy(clLine[:], "Content-Length: ")
@@ -855,7 +800,6 @@ func (c *Connection) writeRequest(conn net.Conn, req *Request, body []byte, comp
 		return nil
 	}
 
-	// Zero-copy header path: write part1, then headerBuf (no copy), then part3 via net.Buffers.
 	part1Buf := c.getWriteBuf(512)
 	defer c.putWriteBuf(part1Buf)
 	p1, part1Err := writeRequestPart1(part1Buf, req, c.config, c.host, c.port, c.config.UseTLS, compressed, c.isForwardProxy)
@@ -899,7 +843,6 @@ func (c *Connection) writeRequest(conn net.Conn, req *Request, body []byte, comp
 	return nil
 }
 
-// readResponse reads and parses one HTTP response from conn.
 func (c *Connection) readResponse(conn net.Conn, resp *Response, timeout time.Duration, method string) error {
 	if timeout > 0 {
 		var deadline time.Time
@@ -944,8 +887,7 @@ func (c *Connection) updateTimeCache() {
 	}
 }
 
-// ctxDoneChan returns ctx.Done(), or nil if ctx is nil.
-// Selecting on a nil channel blocks forever — used to safely skip ctx.Done() in select.
+// nil ctx.Done() blocks forever in select — safe no-op when context is absent.
 func ctxDoneChan(ctx context.Context) <-chan struct{} {
 	if ctx == nil {
 		return nil
@@ -953,10 +895,6 @@ func ctxDoneChan(ctx context.Context) <-chan struct{} {
 	return ctx.Done()
 }
 
-// run reads responses in FIFO order, matching the order requests were written.
-// Cancelled entries are still fully drained from the wire to keep the pipeline in sync.
-// rr.br is a persistent bufio.Reader: leftover bytes from one response carry over
-// to the next read, preventing data loss when the TCP layer batches multiple responses.
 func (rr *ResponseReader) run() {
 	connVal := rr.conn.conn.Load()
 	if connVal == nil {
@@ -969,14 +907,12 @@ func (rr *ResponseReader) run() {
 	conn := *connPtr
 
 	for {
-		// Wait for work.
 		select {
 		case <-rr.stopChan:
 			return
 		case <-rr.conn.pendingSignal:
 		}
 
-		// Drain the entire pending queue before sleeping again.
 		for {
 			rr.conn.pendingMu.Lock()
 			if len(rr.conn.pendingReqs) == 0 {
@@ -990,7 +926,7 @@ func (rr *ResponseReader) run() {
 				return
 			}
 
-			resp := pending.req.resp
+			resp := pending.resp
 			if resp == nil {
 				rr.conn.activeReqs.Add(-1)
 				rr.conn.removePending(pending)
@@ -1004,10 +940,8 @@ func (rr *ResponseReader) run() {
 			}
 			resp.Reset()
 
-			readTimeout := rr.conn.effectiveReadTimeout(pending.req)
+			readTimeout := pending.readTimeout
 
-			// Set deadline on the underlying TCP conn; read via the persistent
-			// bufio.Reader so leftover bytes from the previous response are reused.
 			if readTimeout > 0 {
 				var dl time.Time
 				if readTimeout < 100*time.Millisecond {
@@ -1018,7 +952,7 @@ func (rr *ResponseReader) run() {
 				_ = conn.SetReadDeadline(dl)
 			}
 			err := readResponseBuffered(rr.br, rr.scratch, resp,
-				rr.conn.maxRespSize, pending.req.Method)
+				rr.conn.maxRespSize, pending.method)
 			if err != nil && readTimeout > 0 {
 				_ = conn.SetReadDeadline(time.Time{})
 			}
@@ -1048,7 +982,6 @@ func (rr *ResponseReader) run() {
 					}
 					continue
 				}
-				// Real error — release resp if we own it.
 				rr.conn.recordError()
 				if wasCancelled && pending.releaseFn != nil {
 					pending.releaseFn(resp)

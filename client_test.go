@@ -1957,8 +1957,6 @@ func handleProxyConn(conn net.Conn) {
 	proxyWg.Wait()
 }
 
-// TestProxyDialerCONNECTRequest verifies the CONNECT request is correctly
-// formed (no null bytes in the Host header) when using an HTTP proxy.
 func TestProxyDialerCONNECTRequest(t *testing.T) {
 	// Intercept the raw CONNECT bytes sent by ProxyDialer.
 	var received []byte
@@ -2029,8 +2027,6 @@ func TestProxyDialerCONNECTRequest(t *testing.T) {
 	}
 }
 
-// newHTTPForwardProxy starts an in-process HTTP forward proxy that reads
-// absolute-URI requests and forwards them to the origin.
 func newHTTPForwardProxy(t testing.TB) (addr string, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -2074,8 +2070,6 @@ func newHTTPForwardProxy(t testing.TB) (addr string, stop func()) {
 	return ln.Addr().String(), stop
 }
 
-// TestProxyDialerThroughRealProxy exercises the full client → forward proxy → target
-// path for HTTP (non-TLS) requests.
 func TestProxyDialerThroughRealProxy(t *testing.T) {
 	// Start a tiny origin server.
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2124,9 +2118,6 @@ func TestProxyDialerThroughRealProxy(t *testing.T) {
 	}
 }
 
-// TestForwardProxyRequest verifies that an HTTP (non-TLS) request through a
-// forward proxy uses absolute-URI form and injects the Proxy-Authorization
-// header — without sending a CONNECT request.
 func TestForwardProxyRequest(t *testing.T) {
 	// Capture the raw bytes the client sends to the "proxy".
 	var received []byte
@@ -2201,8 +2192,6 @@ func TestForwardProxyRequest(t *testing.T) {
 	}
 }
 
-// TestProxyCONNECT407 verifies that a 407 proxy rejection includes the status
-// code in the error message returned by ProxyDialer.Dial.
 func TestProxyCONNECT407(t *testing.T) {
 	// Stand up a fake proxy that accepts all connections and always returns 407.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -2280,8 +2269,6 @@ func TestIsForwardProxy(t *testing.T) {
 	}
 }
 
-// TestChunkedBodyWithTrailers verifies that chunked responses with trailer
-// headers are parsed correctly and trailers are fully drained.
 func TestChunkedBodyWithTrailers(t *testing.T) {
 	// Craft a chunked response that includes trailers after the terminal chunk.
 	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Checksum\r\n\r\n" +
@@ -2354,8 +2341,6 @@ func TestGracefulStopUnderLoad(t *testing.T) {
 	<-errCh
 }
 
-// TestMaxRequestsPerConn verifies that connections are cycled after
-// MaxRequestsPerConn requests.
 func TestMaxRequestsPerConn(t *testing.T) {
 	srv, host, port := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -2419,8 +2404,6 @@ func TestIsTimeoutContextDeadline(t *testing.T) {
 	}
 }
 
-// TestIsTimeoutNetError verifies IsTimeout handles net.Error with Timeout()==true.
-// Uses a raw listener that accepts but never responds, so the read deadline fires.
 func TestIsTimeoutNetError(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

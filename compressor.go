@@ -6,7 +6,6 @@ import (
 	"sync"
 )
 
-// Compressor manages a pool of gzip writers for request body compression.
 type Compressor struct {
 	level int
 	pool  sync.Pool
@@ -63,7 +62,6 @@ func (c *Compressor) CompressInto(dst []byte, src []byte) ([]byte, error) {
 	return dst[:len(compressed)], nil
 }
 
-// gzipWriter wraps a gzip.Writer with its buffer.
 type gzipWriter struct {
 	writer *gzip.Writer
 	buf    *bytes.Buffer

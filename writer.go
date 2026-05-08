@@ -4,10 +4,6 @@ import (
 	"net"
 )
 
-// writeRequestHeaderPrefix encodes the request line and all headers up to but
-// not including "Content-Length: N\r\n\r\n". Used for pre-encoded requests:
-// the caller can cache the returned bytes and send multiple requests with
-// the same headers by appending Content-Length and body each time.
 func writeRequestHeaderPrefix(buf []byte, req *Request, cfg *Config, host string, port int, useTLS bool, compressed bool, forwardProxy bool, proxyAuthHeader []byte) (int, error) {
 	pos := 0
 	method := req.Method
@@ -79,11 +75,6 @@ func writeRequestHeaderPrefix(buf []byte, req *Request, cfg *Config, host string
 	return pos, nil
 }
 
-// writeRequest encodes an HTTP request into buf.
-// host and port are the actual dial target (may differ from cfg.Host when
-// URL-routing is used). useTLS controls whether the default port is omitted.
-// forwardProxy: when true the request line uses absolute-form URI and a
-// Proxy-Authorization header is injected (HTTP forward-proxy mode).
 func writeRequest(buf []byte, req *Request, cfg *Config, host string, port int, useTLS bool, body []byte, compressed bool, forwardProxy bool, proxyAuthHeader []byte) (int, error) {
 	pos := 0
 	method := req.Method
@@ -92,7 +83,6 @@ func writeRequest(buf []byte, req *Request, cfg *Config, host string, port int, 
 	}
 	path := req.effectivePath()
 
-	// Request line: METHOD <SP> request-target <SP> HTTP/1.1 CRLF
 	if !writeString(buf, &pos, method) || !writeByte(buf, &pos, ' ') {
 		return 0, ErrHeaderBufferSmall
 	}
@@ -177,8 +167,6 @@ func writeRequest(buf []byte, req *Request, cfg *Config, host string, port int, 
 	return pos, nil
 }
 
-// writeRequestPart1 writes request line, Host, and Connection (and optional
-// Content-Encoding). Stops before custom headers for zero-copy vectored write.
 func writeRequestPart1(buf []byte, req *Request, cfg *Config, host string, port int, useTLS bool, compressed bool, forwardProxy bool) (int, error) {
 	pos := 0
 	method := req.Method
@@ -234,8 +222,6 @@ func writeRequestPart1(buf []byte, req *Request, cfg *Config, host string, port 
 	return pos, nil
 }
 
-// writeRequestPart3 writes proxy auth (if any), Expect 100-continue (if set),
-// and Content-Length + \r\n\r\n. Used with part1 and headerBuf for zero-copy.
 func writeRequestPart3(buf []byte, req *Request, bodyLen int, proxyAuthHeader []byte) (int, error) {
 	pos := 0
 	if len(proxyAuthHeader) > 0 {
@@ -334,7 +320,6 @@ func writeInt(buf []byte, pos *int, n int) bool {
 	return writeBytes(buf, pos, tmp[i:])
 }
 
-// writeAll writes all bytes to the connection.
 func writeAll(conn net.Conn, buf []byte) error {
 	for len(buf) > 0 {
 		n, err := conn.Write(buf)
@@ -346,8 +331,6 @@ func writeAll(conn net.Conn, buf []byte) error {
 	return nil
 }
 
-// writeAllBatched writes header and body efficiently.
-// For small bodies, tries to combine in single syscall when possible without allocation.
 func writeAllBatched(conn net.Conn, header []byte, body []byte) error {
 	if len(body) == 0 {
 		return writeAll(conn, header)

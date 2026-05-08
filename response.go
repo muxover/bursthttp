@@ -8,7 +8,6 @@ const (
 	initialResponseBufferSize = 64 * 1024
 )
 
-// Response represents an HTTP response with pre-allocated body buffer.
 type Response struct {
 	StatusCode    int
 	ContentLength int
@@ -27,8 +26,6 @@ func AcquireResponse() *Response {
 	return resp
 }
 
-// AcquireResponseWithMaxSize gets a response from the pool with a maximum size limit.
-// This allows per-client configuration while maintaining pool efficiency.
 func AcquireResponseWithMaxSize(maxSize int) *Response {
 	resp := AcquireResponse()
 	if maxSize > 0 {
@@ -98,8 +95,6 @@ func (r *Response) Reset() {
 	r.rawHeaderBuf = nil
 }
 
-// Header returns the first value for the given header key (case-insensitive).
-// Returns empty string if the header is not present.
 func (r *Response) Header(key string) string {
 	for _, h := range r.Headers {
 		if strEqualFoldASCII(h.Key, key) {
@@ -109,7 +104,6 @@ func (r *Response) Header(key string) string {
 	return ""
 }
 
-// HasHeader reports whether the response contains the named header (case-insensitive).
 func (r *Response) HasHeader(key string) bool {
 	for _, h := range r.Headers {
 		if strEqualFoldASCII(h.Key, key) {
@@ -119,8 +113,6 @@ func (r *Response) HasHeader(key string) bool {
 	return false
 }
 
-// HeaderValues returns all values for the given header key (case-insensitive).
-// Returns nil if the header is not present.
 func (r *Response) HeaderValues(key string) []string {
 	var vals []string
 	for _, h := range r.Headers {
@@ -131,15 +123,11 @@ func (r *Response) HeaderValues(key string) []string {
 	return vals
 }
 
-// HeaderBytes returns the first value for the given header key as a slice into
-// the response's raw header buffer (zero-copy). The slice is valid only until
-// ReleaseResponse is called. Returns nil if the header is not present.
-// Case-insensitive header name match.
+// zero-copy; slice is invalid after ReleaseResponse
 func (r *Response) HeaderBytes(key string) []byte {
 	return headerBytesFromRaw(r.rawHeaderBuf, key)
 }
 
-// isConnectionClose returns true if the response has a Connection: close header.
 func (r *Response) isConnectionClose() bool {
 	for _, h := range r.Headers {
 		if strEqualFoldASCII(h.Key, "Connection") && strEqualFoldASCII(h.Value, "close") {
@@ -149,7 +137,6 @@ func (r *Response) isConnectionClose() bool {
 	return false
 }
 
-// strEqualFoldASCII is a fast ASCII-only case-insensitive string comparison.
 func strEqualFoldASCII(a, b string) bool {
 	if len(a) != len(b) {
 		return false

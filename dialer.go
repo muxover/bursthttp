@@ -6,7 +6,6 @@ import (
 	"syscall"
 )
 
-// Dialer handles TCP connection establishment with optimised socket settings.
 type Dialer struct {
 	config       *Config
 	proxyDialer  *ProxyDialer
@@ -35,15 +34,10 @@ func NewDialer(config *Config) (*Dialer, error) {
 	return d, nil
 }
 
-// IsForwardProxy reports whether HTTP requests to non-TLS targets should be
-// sent via forward-proxy mode (absolute URI + Proxy-Authorization), rather
-// than through an HTTP CONNECT tunnel.
 func (d *Dialer) IsForwardProxy(useTLS bool) bool {
 	return d.proxyDialer != nil && !useTLS
 }
 
-// ProxyAuthHeader returns the pre-encoded "Proxy-Authorization: Basic …\r\n"
-// header bytes, or nil when no proxy credentials are configured.
 func (d *Dialer) ProxyAuthHeader() []byte {
 	if d.proxyDialer != nil {
 		return d.proxyDialer.authHeader
@@ -51,9 +45,6 @@ func (d *Dialer) ProxyAuthHeader() []byte {
 	return nil
 }
 
-// DialForward connects to the proxy's TCP address without issuing a CONNECT
-// request, then applies the same socket options as DialAddr.
-// Used when IsForwardProxy returns true.
 func (d *Dialer) DialForward() (net.Conn, error) {
 	if d.proxyDialer == nil {
 		return nil, WrapError(ErrorTypeProxy, "no proxy configured for forward dial", ErrProxyFailed)
@@ -86,20 +77,16 @@ func (d *Dialer) DialForward() (net.Conn, error) {
 	return conn, nil
 }
 
-// Stop cleans up dialer resources (DNS cache).
 func (d *Dialer) Stop() {
 	if d.dnsCache != nil {
 		d.dnsCache.Stop()
 	}
 }
 
-// Falls back to config Host/Port when address is empty.
 func (d *Dialer) Dial() (net.Conn, error) {
 	return d.DialAddr("", 0)
 }
 
-// DialAddr establishes a connection to host:port.
-// When host is empty, d.config.Host is used; when port is 0, d.config.Port is used.
 func (d *Dialer) DialAddr(host string, port int) (net.Conn, error) {
 	if host == "" {
 		host = d.config.Host
@@ -182,8 +169,6 @@ func (d *Dialer) DialAddr(host string, port int) (net.Conn, error) {
 	return conn, nil
 }
 
-// buildAddr combines host and port into "host:port" without allocating for
-// the most common ports.
 func buildAddr(host string, port int) string {
 	var portStr string
 	switch port {

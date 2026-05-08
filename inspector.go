@@ -2,7 +2,6 @@ package client
 
 import "time"
 
-// ConnectionInfo is a snapshot of a single live connection's state.
 type ConnectionInfo struct {
 	ID            int
 	Host          string

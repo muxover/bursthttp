@@ -393,8 +393,6 @@ func BenchmarkReadResponse(b *testing.B) {
 	benchmarkClientSerial(b, cfg)
 }
 
-// BenchmarkVsNetHTTP compares bursthttp directly against net/http on identical
-// workloads. Both use keep-alive; the difference is pool/encoding overhead.
 func BenchmarkVsNetHTTPSequential(b *testing.B) {
 	body := []byte("ok")
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -445,11 +443,6 @@ func BenchmarkVsNetHTTPSequential(b *testing.B) {
 	})
 }
 
-// BenchmarkVsNetHTTPPipelined shows bursthttp's pipeline advantage under
-// concurrent load. net/http does not pipeline HTTP/1.1 connections — each
-// goroutine holds a connection exclusively for the full round-trip.
-// bursthttp multiplexes up to MaxPipelinedRequests in-flight per connection,
-// so N goroutines can share far fewer TCP connections without stalling.
 func BenchmarkVsNetHTTPPipelined(b *testing.B) {
 	body := []byte("ok")
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -514,10 +507,6 @@ func BenchmarkVsNetHTTPPipelined(b *testing.B) {
 	}
 }
 
-// BenchmarkPreEncodedVsRegular demonstrates the hot-path win from
-// BuildPreEncodedHeaderPrefix. The prefix (request line + all headers) is
-// encoded once; subsequent sends skip all string formatting and buffer copies,
-// reducing allocations to near zero on the critical path.
 func BenchmarkPreEncodedVsRegular(b *testing.B) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)

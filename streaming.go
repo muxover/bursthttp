@@ -5,8 +5,7 @@ import (
 	"sync"
 )
 
-// StreamingResponse wraps a Response with an io.ReadCloser for the body.
-// Use Client.DoStreaming to obtain one. The caller MUST call Close() when done.
+// Close must be called when done to release the connection back to the pool.
 type StreamingResponse struct {
 	StatusCode    int
 	ContentLength int
@@ -36,8 +35,6 @@ func (sr *StreamingResponse) HasHeader(key string) bool {
 	return false
 }
 
-// Close releases the underlying response back to the pool.
-// Must be called after the body has been fully consumed or abandoned.
 func (sr *StreamingResponse) Close() error {
 	sr.once.Do(func() {
 		if sr.Body != nil {
@@ -50,7 +47,6 @@ func (sr *StreamingResponse) Close() error {
 	return nil
 }
 
-// bodyReader wraps a []byte as an io.ReadCloser.
 type bodyReader struct {
 	data   []byte
 	offset int

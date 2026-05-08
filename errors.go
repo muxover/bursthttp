@@ -8,8 +8,6 @@ import (
 	"net"
 )
 
-// Pre-allocated sentinel errors returned by the library.
-// Use IsTimeout and IsRetryable to classify errors without direct comparison.
 var (
 	ErrConnectFailed     = errors.New("connect failed")
 	ErrWriteFailed       = errors.New("write failed")
@@ -26,7 +24,6 @@ var (
 	ErrInvalidRequest    = errors.New("invalid request")
 )
 
-// ErrorType represents the category of error for logging and handling.
 type ErrorType string
 
 const (
@@ -39,7 +36,6 @@ const (
 	ErrorTypeInternal   ErrorType = "internal"
 )
 
-// DetailedError wraps an error with type and context for detailed logging.
 type DetailedError struct {
 	Type    ErrorType
 	Message string
@@ -58,7 +54,6 @@ func (e *DetailedError) Unwrap() error {
 	return e.Err
 }
 
-// LogErrorWithFlag logs a detailed error with type and context if enableLogging is true.
 func LogErrorWithFlag(errType ErrorType, message string, err error, context map[string]interface{}, enableLogging bool) error {
 	detailedErr := &DetailedError{
 		Type:    errType,
@@ -78,7 +73,6 @@ func LogErrorWithFlag(errType ErrorType, message string, err error, context map[
 	return detailedErr
 }
 
-// WrapError creates a detailed error without logging (for retry scenarios).
 func WrapError(errType ErrorType, message string, err error) error {
 	return &DetailedError{
 		Type:    errType,
@@ -87,8 +81,6 @@ func WrapError(errType ErrorType, message string, err error) error {
 	}
 }
 
-// Handles net.Error timeouts, context.DeadlineExceeded, ErrTimeout,
-// and DetailedError with ErrorTypeTimeout — including wrapped errors.
 func IsTimeout(err error) bool {
 	if err == nil {
 		return false

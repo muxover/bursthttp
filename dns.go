@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-// DNSCache is a thread-safe, TTL-based DNS resolution cache with async refresh,
-// in-flight deduplication, round-robin IP selection, and negative caching.
 type DNSCache struct {
 	ttl         time.Duration
 	negativeTTL time.Duration
@@ -22,7 +20,6 @@ type DNSCache struct {
 	stopOnce   sync.Once
 }
 
-// dnsInflight represents an in-progress lookup.
 type dnsInflight struct {
 	done  chan struct{}
 	addrs []string
@@ -36,8 +33,6 @@ type dnsEntry struct {
 	idx uint32
 }
 
-// NewDNSCache creates a new DNS cache with the given TTL and starts background
-// prefetch and janitor goroutines.
 func NewDNSCache(ttl time.Duration, negativeTTL time.Duration) *DNSCache {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
@@ -57,9 +52,6 @@ func NewDNSCache(ttl time.Duration, negativeTTL time.Duration) *DNSCache {
 	return c
 }
 
-// LookupHost resolves a hostname to an IP address using the cache.
-// Multiple concurrent misses for the same host share one lookup (singleflight).
-// Returns a single IP selected via round-robin when multiple IPs are cached.
 func (c *DNSCache) LookupHost(host string) ([]string, error) {
 	if net.ParseIP(host) != nil {
 		return []string{host}, nil
@@ -140,8 +132,6 @@ func (c *DNSCache) LookupHost(host string) ([]string, error) {
 	return []string{addrs[0]}, nil
 }
 
-// backgroundRefresh performs a non-blocking DNS refresh for host.
-// It will no-op if a lookup is already in flight for the host.
 func (c *DNSCache) backgroundRefresh(host string) {
 	c.inflightMu.Lock()
 	if _, exists := c.inflight[host]; exists {
@@ -209,15 +199,12 @@ func (c *DNSCache) Clear() {
 	c.mu.Unlock()
 }
 
-// Stop shuts down the background goroutines.
 func (c *DNSCache) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.stopCh)
 	})
 }
 
-// janitor periodically evicts expired entries and triggers prefetch for
-// entries approaching TTL expiry (80% threshold).
 func (c *DNSCache) janitor() {
 	// Check at 1/4 TTL intervals to catch prefetch window accurately.
 	interval := c.ttl / 4

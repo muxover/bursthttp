@@ -9,10 +9,6 @@ import (
 	"strings"
 )
 
-// readResponse parses an HTTP/1.1 response from r.
-// method is the HTTP method used (HEAD requests have no body).
-// buf is a caller-supplied scratch buffer; it must not be retained after return.
-// r may be a *bufio.Reader to preserve leftover bytes between pipelined reads.
 func readResponse(r io.Reader, buf []byte, resp *Response, maxBody int, method string, headerReadSize int, bodyReadSize int) error {
 	total := 0
 	headerEnd := -1
@@ -50,7 +46,6 @@ func readResponse(r io.Reader, buf []byte, resp *Response, maxBody int, method s
 
 	isHEAD := method == "HEAD"
 
-	// No-body status codes.
 	if isHEAD || status == 204 || status == 304 || status == 101 {
 		resp.StatusCode = status
 		resp.ContentLength = 0
@@ -59,7 +54,6 @@ func readResponse(r io.Reader, buf []byte, resp *Response, maxBody int, method s
 		return nil
 	}
 
-	// Check Transfer-Encoding: chunked before Content-Length.
 	if parseTransferEncoding(buf[:headerEnd]) {
 		resp.StatusCode = status
 		parseHeaders(buf[:headerEnd], resp)
@@ -68,7 +62,6 @@ func readResponse(r io.Reader, buf []byte, resp *Response, maxBody int, method s
 
 	length, hasLen := parseContentLength(buf[:headerEnd])
 	if !hasLen {
-		// No Content-Length, no chunked — read until close.
 		return readResponseUntilEOF(r, buf, resp, headerEnd, total, maxBody, bodyReadSize)
 	}
 
@@ -130,20 +123,16 @@ func readResponse(r io.Reader, buf []byte, resp *Response, maxBody int, method s
 	return nil
 }
 
-// readChunkedBody reads a chunked transfer-encoding body.
-// Initial bytes already in buf[headerEnd:total] are consumed first.
 func readChunkedBody(r io.Reader, buf []byte, resp *Response, headerEnd, total, maxBody, bodyReadSize int) error {
 	if bodyReadSize <= 0 {
 		bodyReadSize = 65536
 	}
 
-	// Leftover bytes from the header read that belong to the body.
 	leftover := buf[headerEnd:total]
 	leftoverOff := 0
 
 	var lineBuf [64]byte
 
-	// readByte reads the next byte from leftover or r.
 	readByte := func() (byte, error) {
 		if leftoverOff < len(leftover) {
 			b := leftover[leftoverOff]
@@ -162,7 +151,6 @@ func readChunkedBody(r io.Reader, buf []byte, resp *Response, headerEnd, total, 
 		}
 	}
 
-	// readLine reads until LF, returning content without CRLF.
 	readLine := func() ([]byte, error) {
 		lineLen := 0
 		for {
@@ -184,7 +172,6 @@ func readChunkedBody(r io.Reader, buf []byte, resp *Response, headerEnd, total, 
 		}
 	}
 
-	// readExact reads exactly n bytes.
 	readExact := func(dst []byte) error {
 		off := 0
 		for off < len(dst) {
@@ -214,7 +201,6 @@ func readChunkedBody(r io.Reader, buf []byte, resp *Response, headerEnd, total, 
 			return err
 		}
 
-		// Strip chunk extensions.
 		for i, c := range line {
 			if c == ';' {
 				line = line[:i]
@@ -252,7 +238,6 @@ func readChunkedBody(r io.Reader, buf []byte, resp *Response, headerEnd, total, 
 		}
 		bodyLen += chunkSize
 
-		// Consume CRLF after chunk data.
 		_, _ = readLine()
 	}
 
@@ -261,8 +246,6 @@ func readChunkedBody(r io.Reader, buf []byte, resp *Response, headerEnd, total, 
 	return nil
 }
 
-// readResponseUntilEOF reads response body until EOF when Content-Length is missing
-// and Transfer-Encoding is not chunked. Only valid for Connection: close responses.
 func readResponseUntilEOF(r io.Reader, buf []byte, resp *Response, headerEnd int, total int, maxBody int, bodyReadSize int) error {
 	status, _ := parseStatusCode(buf[:headerEnd])
 	resp.StatusCode = status
@@ -329,16 +312,7 @@ func readResponseUntilEOF(r io.Reader, buf []byte, resp *Response, headerEnd int
 	return nil
 }
 
-// readResponseBuffered reads one HTTP/1.1 response from a *bufio.Reader.
-//
-// Headers are read byte-by-byte via br.ReadByte() so the read cursor stops
-// exactly at the end of "\r\n\r\n" — no bytes from the next response are
-// consumed into the scratch buffer.  The body is read with io.ReadFull (for
-// Content-Length responses), which reads exactly the declared number of bytes
-// and leaves all remaining data in br's internal buffer for the next response.
-//
-// This is the correct parser for HTTP/1.1 pipelining where multiple responses
-// may arrive in a single TCP segment.
+// reads byte-by-byte to stop exactly after "\r\n\r\n"; body via io.ReadFull preserves br's cursor for the next pipelined response
 func readResponseBuffered(br *bufio.Reader, scratch []byte, resp *Response, maxBody int, method string) error {
 	total := 0
 	for {
@@ -351,14 +325,13 @@ func readResponseBuffered(br *bufio.Reader, scratch []byte, resp *Response, maxB
 		}
 		scratch[total] = b
 		total++
-		// Detect the blank-line terminator.
 		if total >= 4 &&
 			scratch[total-4] == '\r' && scratch[total-3] == '\n' &&
 			scratch[total-2] == '\r' && scratch[total-1] == '\n' {
 			break
 		}
 	}
-	headerEnd := total // scratch[:headerEnd] is the complete header block
+	headerEnd := total
 
 	status, ok := parseStatusCode(scratch[:headerEnd])
 	if !ok {
@@ -367,7 +340,6 @@ func readResponseBuffered(br *bufio.Reader, scratch []byte, resp *Response, maxB
 
 	isHEAD := method == "HEAD"
 
-	// No-body status codes.
 	if isHEAD || status == 204 || status == 304 || status == 101 {
 		resp.StatusCode = status
 		resp.ContentLength = 0
@@ -376,7 +348,6 @@ func readResponseBuffered(br *bufio.Reader, scratch []byte, resp *Response, maxB
 		return nil
 	}
 
-	// Chunked transfer-encoding.
 	if parseTransferEncoding(scratch[:headerEnd]) {
 		resp.StatusCode = status
 		parseHeaders(scratch[:headerEnd], resp)
@@ -386,10 +357,8 @@ func readResponseBuffered(br *bufio.Reader, scratch []byte, resp *Response, maxB
 		return decompressBody(resp)
 	}
 
-	// Content-Length.
 	length, hasLen := parseContentLength(scratch[:headerEnd])
 	if !hasLen {
-		// No Content-Length, no chunked — read until connection close.
 		if err := readResponseUntilEOF(br, scratch, resp, headerEnd, headerEnd, maxBody, 65536); err != nil {
 			return err
 		}
@@ -414,23 +383,16 @@ func readResponseBuffered(br *bufio.Reader, scratch []byte, resp *Response, maxB
 	}
 	resp.Body = resp.bodyBuf[:length]
 
-	// io.ReadFull reads EXACTLY length bytes from br's internal buffer (plus
-	// the underlying conn if needed), leaving all subsequent bytes intact for
-	// the next response in the pipeline.
 	if _, err := io.ReadFull(br, resp.Body); err != nil {
 		return err
 	}
 	return decompressBody(resp)
 }
 
-// decompressBody decompresses resp.Body in-place when Content-Encoding is gzip.
-// It replaces resp.Body and resp.bodyBuf with the decompressed data and updates
-// resp.ContentLength. It is a no-op for any other or absent encoding.
 func decompressBody(resp *Response) error {
 	if len(resp.Body) == 0 {
 		return nil
 	}
-	// Scan headers for Content-Encoding: gzip (case-insensitive).
 	isGzip := false
 	for _, h := range resp.Headers {
 		if strings.EqualFold(h.Key, "Content-Encoding") &&
@@ -454,9 +416,7 @@ func decompressBody(resp *Response) error {
 		return WrapError(ErrorTypeProtocol, "gzip decompression failed", err)
 	}
 
-	// Store decompressed bytes back into resp, growing bodyBuf if needed.
 	if !resp.ensureBufferSize(len(decompressed)) {
-		// If maxSize would be exceeded, store what we can and truncate.
 		decompressed = decompressed[:len(resp.bodyBuf)]
 	}
 	copy(resp.bodyBuf[:len(decompressed)], decompressed)
@@ -482,21 +442,17 @@ func findHeaderEnd(buf []byte) int {
 	return -1
 }
 
-// Handles HTTP/1.0 and HTTP/1.1. Returns (code, true) on success.
 func parseStatusCode(buf []byte) (int, bool) {
-	// Minimum: "HTTP/1.1 200" = 12 bytes
 	if len(buf) < 12 {
 		return 0, false
 	}
 	if buf[0] != 'H' || buf[1] != 'T' || buf[2] != 'T' || buf[3] != 'P' || buf[4] != '/' {
 		return 0, false
 	}
-	// Skip version field until first space.
 	i := 5
 	for i < len(buf) && buf[i] != ' ' && buf[i] != '\t' {
 		i++
 	}
-	// Skip whitespace.
 	for i < len(buf) && (buf[i] == ' ' || buf[i] == '\t') {
 		i++
 	}
@@ -622,9 +578,6 @@ func containsChunked(b []byte) bool {
 	return false
 }
 
-// headerBytesFromRaw returns the first header value for key as a slice into
-// raw (zero-copy). raw is the full response header block including status line.
-// Returns nil if not found. Case-insensitive key match.
 func headerBytesFromRaw(raw []byte, key string) []byte {
 	if len(raw) == 0 || len(key) == 0 {
 		return nil
@@ -663,7 +616,6 @@ func headerBytesFromRaw(raw []byte, key string) []byte {
 			for keyEnd > keyStart && (raw[keyEnd-1] == ' ' || raw[keyEnd-1] == '\t') {
 				keyEnd--
 			}
-			// Case-insensitive compare of key with raw[keyStart:keyEnd].
 			if keyEnd-keyStart == len(key) {
 				match := true
 				for i := 0; i < len(key); i++ {
@@ -698,13 +650,9 @@ func headerBytesFromRaw(raw []byte, key string) []byte {
 	return nil
 }
 
-// Keys and values are copied into Go strings so the caller can freely
-// reuse or recycle buf after this call returns.
-// Also stores a copy of headerBuf in resp.rawHeaderBuf for zero-copy HeaderBytes().
 func parseHeaders(headerBuf []byte, resp *Response) {
 	resp.rawHeaderBuf = make([]byte, len(headerBuf))
 	copy(resp.rawHeaderBuf, headerBuf)
-	// Find the end of the status line (first \r\n).
 	statusLineEnd := -1
 	for i := 0; i+1 < len(headerBuf); i++ {
 		if headerBuf[i] == '\r' && headerBuf[i+1] == '\n' {

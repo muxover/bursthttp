@@ -66,15 +66,10 @@ type Config struct {
 	DNSCacheTTL    time.Duration
 	DNSNegativeTTL time.Duration // how long to cache failed lookups (default 5s)
 
-	// Scheduler: opt-in request scheduler for stable latency under load.
-	// When true, DoWithContext routes through per-host worker queues.
 	EnableScheduler     bool
 	SchedulerWorkers    int // workers per host (default: PoolSize)
 	SchedulerQueueDepth int // max queued requests per host (default: workers*4)
 
-	// Connection health scoring: track per-connection latency EWMA and error
-	// rate; prefer lower-latency connections during pool selection.
-	// Enabled by default.
 	EnableHealthScoring bool
 
 	IdleCheckInterval time.Duration
@@ -87,19 +82,12 @@ type Config struct {
 	TCPFastOpen        bool // Linux only: TCP Fast Open (TFO)
 	TCPReusePort       bool // Linux only: SO_REUSEPORT
 
-	// Pipeline auto-tuning: dynamically adjusts pipeline depth per connection
-	// based on measured round-trip latency. <10ms → grow; >100ms → shrink.
 	EnablePipelineAutoTune bool
 
 	EnableLogging bool
 
-	// Set to a MetricsCollector implementation to receive per-request telemetry.
-	// nil disables metrics (default).
 	Metrics MetricsCollector
 
-	// Traffic shaping: caps outgoing request rate to RequestsPerSecond.
-	// BurstSize controls how many requests may exceed the steady-state rate in
-	// a burst. Both must be > 0 to activate the rate limiter.
 	RequestsPerSecond float64
 	BurstSize         int
 }
@@ -158,7 +146,6 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Use this for large-scale workloads (100K+ RPS) with adequate hardware.
 func HighThroughputConfig() *Config {
 	cfg := DefaultConfig()
 	cfg.PoolSize = 1024

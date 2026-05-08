@@ -7,27 +7,11 @@ import (
 	"time"
 )
 
-// MetricsCollector is the interface for receiving request/response events.
-// Implement it and set Config.Metrics to plug in any metrics backend
-// (Prometheus, statsd, in-memory, etc.).
-//
 // All methods must be safe for concurrent use.
 type MetricsCollector interface {
-	// RecordRequest is called when a request starts. Returns a timestamp
-	// that should be passed to RecordResponse for latency tracking.
 	RecordRequest(method, host string) time.Time
-
-	// RecordResponse is called after every completed request.
-	// statusCode is 0 if the request failed before a response was received.
-	// err is non-nil when the request failed.
-	// start is the timestamp returned by RecordRequest.
-	// bytesWritten and bytesRead are wire-level byte counts.
 	RecordResponse(method, host string, statusCode int, err error, start time.Time, bytesWritten, bytesRead int64)
-
-	// RecordPoolEvent is called for connection pool events.
 	RecordPoolEvent(event PoolEvent, host string)
-
-	// Snapshot returns a point-in-time copy of collected metrics.
 	Snapshot() MetricsSnapshot
 }
 
@@ -40,7 +24,6 @@ const (
 	PoolEventConnFailed
 )
 
-// MetricsSnapshot is a point-in-time copy of collected metric values.
 type MetricsSnapshot struct {
 	RequestsTotal int64
 	RequestsOK    int64
@@ -67,11 +50,6 @@ type MetricsSnapshot struct {
 	ConnsFailed  int64
 }
 
-// BuiltinMetrics is a thread-safe in-memory MetricsCollector included with
-// bursthttp. It provides request counts, latency percentiles, byte
-// counters, and connection pool statistics.
-//
-//	cfg.Metrics = bursthttp.NewBuiltinMetrics()
 type BuiltinMetrics struct {
 	requestsTotal atomic.Int64
 	requestsOK    atomic.Int64

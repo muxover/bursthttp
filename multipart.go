@@ -8,9 +8,6 @@ import (
 	"path/filepath"
 )
 
-// MultipartBuilder constructs a multipart/form-data body incrementally.
-// Use NewMultipartBuilder, add fields/files, then call Finish to get the
-// body bytes and Content-Type header value.
 type MultipartBuilder struct {
 	buf    bytes.Buffer
 	writer *multipart.Writer
@@ -26,7 +23,6 @@ func (mb *MultipartBuilder) AddField(name, value string) error {
 	return mb.writer.WriteField(name, value)
 }
 
-// AddFileFromPath adds a file field by reading from the filesystem.
 func (mb *MultipartBuilder) AddFileFromPath(fieldName, filePath string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -42,7 +38,6 @@ func (mb *MultipartBuilder) AddFileFromPath(fieldName, filePath string) error {
 	return err
 }
 
-// AddFileFromBytes adds a file field from an in-memory byte slice.
 func (mb *MultipartBuilder) AddFileFromBytes(fieldName, fileName string, data []byte) error {
 	part, err := mb.writer.CreateFormFile(fieldName, fileName)
 	if err != nil {
@@ -52,7 +47,6 @@ func (mb *MultipartBuilder) AddFileFromBytes(fieldName, fileName string, data []
 	return err
 }
 
-// AddFileFromReader adds a file field by reading from an io.Reader.
 func (mb *MultipartBuilder) AddFileFromReader(fieldName, fileName string, reader io.Reader) error {
 	part, err := mb.writer.CreateFormFile(fieldName, fileName)
 	if err != nil {
@@ -66,8 +60,6 @@ func (mb *MultipartBuilder) ContentType() string {
 	return mb.writer.FormDataContentType()
 }
 
-// Finish closes the multipart writer (writes the trailing boundary) and
-// returns the complete body bytes and Content-Type header value.
 func (mb *MultipartBuilder) Finish() (body []byte, contentType string, err error) {
 	if err := mb.writer.Close(); err != nil {
 		return nil, "", err
@@ -75,8 +67,6 @@ func (mb *MultipartBuilder) Finish() (body []byte, contentType string, err error
 	return mb.buf.Bytes(), mb.writer.FormDataContentType(), nil
 }
 
-// BuildMultipartRequest is a convenience that creates a Request with a
-// multipart body from field and file data.
 func BuildMultipartRequest(client *Client, method, urlOrPath string, fields map[string]string, files map[string][]byte) (*Request, error) {
 	mb := NewMultipartBuilder()
 	for k, v := range fields {
