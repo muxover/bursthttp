@@ -36,8 +36,8 @@ type PendingRequest struct {
 	err         chan error
 	cancelled   atomic.Bool // true when caller's context fired
 	releaseFn   func(*Response)
-	sentAt      int64 // UnixNano when request was written to wire
-	resp        *Response     // snapshotted at enqueue; req may be released before ResponseReader runs
+	sentAt      int64     // UnixNano when request was written to wire
+	resp        *Response // snapshotted at enqueue; req may be released before ResponseReader runs
 	readTimeout time.Duration
 	method      string
 }
